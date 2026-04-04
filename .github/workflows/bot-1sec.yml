@@ -21,10 +21,12 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install pyTelegramBotAPI psutil
+        pip install aiogram==3.15.0
+        pip install psutil==5.9.6
+        pip install pyTelegramBotAPI==4.14.0
     
     - name: Run bot
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         OWNER_ID: ${{ secrets.OWNER_ID }}
-      run: python Deploy.py   # ⬅️ E'tibor bering: Deploy.py (app.py emas!)
+      run: python Deploy.py
