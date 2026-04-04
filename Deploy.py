@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ================================================================
-# BOT DEPLOY BOT - AIOGRAM VERSIYA
-# Version: 5.0
+# BOT DEPLOY BOT - AIOGRAM VERSIYA (TO'LIQ TUZATILGAN)
+# Version: 5.1
 # Sana: 2026-04-04
 # ================================================================
-# AIOGRAM BILAN ISHLAYDI - KOPCHILIK BOTLAR SHUNI ISHLATADI
+# TUZATILDI: AttributeError 'fh' xatosi to'g'irlandi
+# TUZATILDI: Conflict xatosi uchun webhook o'chirildi
 # ================================================================
 
 import asyncio
@@ -472,7 +473,7 @@ class FileHandler:
 
 
 # ================================================================
-# KOD TAHLILCHI (AIoGRAM UCHUN YANGILANDI)
+# KOD TAHLILCHI
 # ================================================================
 
 class CodeAnalyzer:
@@ -526,7 +527,6 @@ class CodeAnalyzer:
         result['file_size_kb'] = round(file_size / 1024, 2)
         result['line_count'] = content.count('\n') + 1
 
-        # Framework aniqlash
         for key, name in self.bot_frameworks.items():
             if key in content:
                 result['framework'] = name
@@ -534,7 +534,6 @@ class CodeAnalyzer:
                     result['is_aiogram'] = True
                 break
 
-        # Aiogram patternlarini tekshirish
         if not result['is_aiogram']:
             for pattern in self.aiogram_patterns:
                 if re.search(pattern, content, re.IGNORECASE):
@@ -542,11 +541,9 @@ class CodeAnalyzer:
                     result['is_aiogram'] = True
                     break
 
-        # Importlarni topish
         import_matches = re.findall(r'^(?:from|import)\s+([\w.]+)', content, re.MULTILINE)
         result['imports'] = list(set(import_matches))
 
-        # Tokenni topish
         for pattern, name in self.token_patterns:
             match = re.search(pattern, content)
             if match:
@@ -554,7 +551,6 @@ class CodeAnalyzer:
                 result['token_pattern'] = name
                 break
 
-        # Requirements.txt ni tekshirish
         req_path = os.path.join(os.path.dirname(file_path), 'requirements.txt')
         if os.path.exists(req_path):
             result['has_requirements'] = True
@@ -569,11 +565,9 @@ class CodeAnalyzer:
             except:
                 pass
 
-        # Agar aiogram bo'lsa, requirements ga aiogram qo'shish
         if result['is_aiogram'] and 'aiogram' not in result['requirements']:
             result['requirements'].insert(0, 'aiogram')
 
-        # Sintaksis tekshirish
         try:
             compile(content, file_path, 'exec')
         except SyntaxError as e:
@@ -874,7 +868,7 @@ class ProcessManager:
 
 
 # ================================================================
-# TOKEN VALIDATOR (AIoGRAM UCHUN)
+# TOKEN VALIDATOR
 # ================================================================
 
 class TokenValidator:
@@ -910,7 +904,7 @@ class TokenValidator:
 
 
 # ================================================================
-# DEPLOY ENGINE (ASYNCHRON)
+# DEPLOY ENGINE
 # ================================================================
 
 class DeployEngine:
@@ -1070,7 +1064,7 @@ class DeployEngine:
 
 
 # ================================================================
-# SHABLONLAR (AIoGRAM UCHUN QO'SHILDI)
+# SHABLONLAR
 # ================================================================
 
 class TemplateManager:
@@ -1234,6 +1228,7 @@ class DeployBot:
         self.tv = TokenValidator()
         self.engine = DeployEngine(self.db, self.pm, self.tv)
         self.templates = TemplateManager()
+        self.fh = FileHandler()  # ✅ QO'SHILDI - 'fh' xatosi uchun
         self.start_time = datetime.now()
         self._setup_handlers()
         self._init_dirs()
@@ -1244,7 +1239,6 @@ class DeployBot:
             os.makedirs(d, exist_ok=True)
 
     def _ikb(self, btns, width=2):
-        """Inline keyboard yaratish"""
         keyboard = []
         row = []
         for i, (text, callback) in enumerate(btns):
@@ -1257,7 +1251,6 @@ class DeployBot:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     def _rkb(self, rows):
-        """Reply keyboard yaratish"""
         keyboard = []
         for row in rows:
             keyboard.append([KeyboardButton(text=btn) for btn in row])
@@ -1266,7 +1259,6 @@ class DeployBot:
     def _setup_handlers(self):
         dp = self.dp
 
-        # FSM handlerlar
         @dp.message(Command("start"))
         async def start_cmd(message: types.Message, state: FSMContext):
             await self._start(message, state)
@@ -1359,6 +1351,12 @@ class DeployBot:
         uid = message.from_user.id
         self.db.register_user(uid, message.from_user.username, message.from_user.first_name)
         await state.clear()
+
+        # Webhookni o'chirish (Conflict xatosi uchun)
+        try:
+            await self.bot.delete_webhook(drop_pending_updates=True)
+        except:
+            pass
 
         if self.db.is_user_banned(uid):
             await message.answer(f"{EMOJI_LOCK} Siz bloklangansiz.")
@@ -1676,14 +1674,15 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
             shutil.rmtree(temp_dir, ignore_errors=True)
             return
 
+        # ✅ TO'G'RI - self.fh ishlatiladi
         valid, msg = self.fh.validate_file(file_path)
         if not valid:
             await message.answer(f"{EMOJI_CROSS} {msg}")
             shutil.rmtree(temp_dir, ignore_errors=True)
             return
 
-        analysis = self.ca.analyze_code(file_path)
-        analysis_text = self.ca.get_analysis_text(analysis)
+        analysis = self.engine.ca.analyze_code(file_path)
+        analysis_text = self.engine.ca.get_analysis_text(analysis)
 
         if not analysis['valid']:
             await message.answer(f"{EMOJI_CROSS} Kodda xatoliklar bor:\n\n{analysis_text}")
@@ -1889,7 +1888,14 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
 
     async def on_startup(self):
         log.info("Bot ishga tushmoqda...")
-        # Server restartdan keyin avvalgi botlarni qayta ishga tushirish
+        # Webhookni o'chirish (Conflict xatosi uchun)
+        try:
+            await self.bot.delete_webhook(drop_pending_updates=True)
+            log.info("Webhook o'chirildi")
+        except Exception as e:
+            log.warning(f"Webhook o'chirish xatosi: {e}")
+        
+        # Avvalgi botlarni qayta tiklash
         log.info("Avvalgi botlarni qayta tiklash boshlanmoqda...")
         restored, failed = self.pm.restore_all_bots(self.db)
         if restored > 0:
@@ -1926,10 +1932,10 @@ def print_banner():
     sys_info = get_system_info()
     banner = f"""
 {'=' * 55}
-{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v5.0 (Aiogram)
+{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v5.1 (Aiogram)
 {'=' * 55}
 
-  Versiya:      5.0 (Aiogram bilan ishlaydi)
+  Versiya:      5.1 (To'liq tuzatilgan)
   Sana:         2026-04-04
   Platform:     {sys_info['platform']} {sys_info['platform_release']}
   Python:       {sys_info['python_version']}
@@ -1945,6 +1951,7 @@ def print_banner():
   {EMOJI_CHECK} Bot shablonlari (Aiogram + Telebot)
   {EMOJI_CHECK} Statistika va monitoring
   {EMOJI_CHECK} Server restartda avvalgi botlar avtomatik tiklanadi
+  {EMOJI_CHECK} Webhook avtomatik o'chiriladi (Conflict xatosi yo'q)
 
 {'=' * 55}
   SOZLAMALAR:
