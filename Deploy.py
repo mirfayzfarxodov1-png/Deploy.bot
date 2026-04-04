@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ================================================================
-# BOT DEPLOY BOT - TO'LIQ ISHLATILADIGAN VERSIYA
-# Version: 4.6
-# Sana: 2026-03-31
+# BOT DEPLOY BOT - AIOGRAM VERSIYA
+# Version: 5.0
+# Sana: 2026-04-04
 # ================================================================
-# TUZATILDI: Server qayta ishga tushganda avvalgi botlar avtomatik ishga tushadi
+# AIOGRAM BILAN ISHLAYDI - KOPCHILIK BOTLAR SHUNI ISHLATADI
 # ================================================================
 
-import telebot
-from telebot import types
+import asyncio
 import os
 import sys
 import re
@@ -30,6 +29,14 @@ import platform
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, Dict, List, Tuple, Any
+
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================================================================
 # KONFIGURATSIYA
@@ -76,10 +83,12 @@ BOT_STATUS_STOPPED = "stopped"
 BOT_STATUS_FAILED = "failed"
 BOT_STATUS_STARTING = "starting"
 
-STATE_IDLE = "idle"
-STATE_AWAITING_FILE = "awaiting_file"
-STATE_AWAITING_TOKEN = "awaiting_token"
+# FSM States
+class DeployStates(StatesGroup):
+    waiting_for_file = State()
+    waiting_for_token = State()
 
+# Emojilar
 EMOJI_ROCKET = "🚀"
 EMOJI_CHECK = "✅"
 EMOJI_CROSS = "❌"
@@ -344,7 +353,6 @@ class Database:
                              (user_id, limit))
 
     def get_all_deploys(self):
-        """Barcha deploylarni olish (server restartda ishlatiladi)"""
         return self.fetchall('SELECT * FROM deployments WHERE status IN (?, ?)',
                              (BOT_STATUS_RUNNING, BOT_STATUS_STARTING))
 
@@ -464,7 +472,7 @@ class FileHandler:
 
 
 # ================================================================
-# KOD TAHLILCHI
+# KOD TAHLILCHI (AIoGRAM UCHUN YANGILANDI)
 # ================================================================
 
 class CodeAnalyzer:
@@ -478,6 +486,16 @@ class CodeAnalyzer:
             (r'BOT_TOKEN\s*=\s*["\']([^"\']+)["\']', 'BOT_TOKEN='),
             (r'bot_token\s*=\s*["\']([^"\']+)["\']', 'bot_token='),
             (r'TOKEN\s*=\s*["\']([^"\']+)["\']', 'TOKEN='),
+            (r'API_TOKEN\s*=\s*["\']([^"\']+)["\']', 'API_TOKEN='),
+        ]
+        self.aiogram_patterns = [
+            r'from\s+aiogram\s+import',
+            r'import\s+aiogram',
+            r'Dispatcher',
+            r'Router',
+            r'types\.Message',
+            r'@.*\.message',
+            r'@.*\.callback_query',
         ]
 
     def analyze_code(self, file_path):
@@ -494,6 +512,7 @@ class CodeAnalyzer:
             'line_count': 0,
             'file_size_kb': 0,
             'code_quality_score': 100,
+            'is_aiogram': False,
         }
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -507,14 +526,27 @@ class CodeAnalyzer:
         result['file_size_kb'] = round(file_size / 1024, 2)
         result['line_count'] = content.count('\n') + 1
 
+        # Framework aniqlash
         for key, name in self.bot_frameworks.items():
             if key in content:
                 result['framework'] = name
+                if key == 'aiogram':
+                    result['is_aiogram'] = True
                 break
 
+        # Aiogram patternlarini tekshirish
+        if not result['is_aiogram']:
+            for pattern in self.aiogram_patterns:
+                if re.search(pattern, content, re.IGNORECASE):
+                    result['framework'] = 'aiogram'
+                    result['is_aiogram'] = True
+                    break
+
+        # Importlarni topish
         import_matches = re.findall(r'^(?:from|import)\s+([\w.]+)', content, re.MULTILINE)
         result['imports'] = list(set(import_matches))
 
+        # Tokenni topish
         for pattern, name in self.token_patterns:
             match = re.search(pattern, content)
             if match:
@@ -522,6 +554,7 @@ class CodeAnalyzer:
                 result['token_pattern'] = name
                 break
 
+        # Requirements.txt ni tekshirish
         req_path = os.path.join(os.path.dirname(file_path), 'requirements.txt')
         if os.path.exists(req_path):
             result['has_requirements'] = True
@@ -536,6 +569,11 @@ class CodeAnalyzer:
             except:
                 pass
 
+        # Agar aiogram bo'lsa, requirements ga aiogram qo'shish
+        if result['is_aiogram'] and 'aiogram' not in result['requirements']:
+            result['requirements'].insert(0, 'aiogram')
+
+        # Sintaksis tekshirish
         try:
             compile(content, file_path, 'exec')
         except SyntaxError as e:
@@ -556,8 +594,9 @@ class CodeAnalyzer:
         if not analysis['valid']:
             return f"{EMOJI_CROSS} KODDA XATOLIKLAR BOR!\n\n" + "\n".join(f"• {e}" for e in analysis['errors'][:3])
 
+        framework_icon = "🤖" if analysis['is_aiogram'] else "📦"
         txt = f"{EMOJI_CHECK} KOD TAHLILI\n\n"
-        txt += f"{EMOJI_PAGE} Framework: {analysis['framework']}\n"
+        txt += f"{framework_icon} Framework: {analysis['framework']}\n"
         txt += f"{EMOJI_SIZE} Qatorlar: {analysis['line_count']}\n"
         txt += f"{EMOJI_SIZE} Hajm: {analysis['file_size_kb']} KB\n"
         txt += f"{EMOJI_KEY} Token: {'Bor' if analysis['has_token'] else 'Yo'}"
@@ -567,6 +606,8 @@ class CodeAnalyzer:
         txt += f"{EMOJI_BOX} Requirements: {'Bor' if analysis['has_requirements'] else 'Yo'}"
         if analysis['requirements']:
             txt += f" ({len(analysis['requirements'])} ta)"
+            if 'aiogram' in analysis['requirements']:
+                txt += f" [{EMOJI_CHECK} aiogram]"
         txt += "\n"
         txt += f"{EMOJI_ARROW} Importlar: {len(analysis['imports'])} ta\n"
         txt += f"{EMOJI_STAR} Sifat baho: {analysis['code_quality_score']}/100\n"
@@ -586,6 +627,7 @@ class CodeAnalyzer:
                 r'BOT_TOKEN\s*=\s*["\'][^"\']*["\']',
                 r'bot_token\s*=\s*["\'][^"\']*["\']',
                 r'TOKEN\s*=\s*["\'][^"\']*["\']',
+                r'API_TOKEN\s*=\s*["\'][^"\']*["\']',
             ]
 
             replaced = False
@@ -607,7 +649,7 @@ class CodeAnalyzer:
 
 
 # ================================================================
-# PROSESS MANAGER (UTF-8 QO'LLAB-QUVVATLANADI + AUTO RESTORE)
+# PROSESS MANAGER
 # ================================================================
 
 class ProcessManager:
@@ -664,32 +706,18 @@ class ProcessManager:
         log.info(f"  Main file: {main_file}")
 
         try:
-            if sys.platform == 'win32':
-                proc = subprocess.Popen(
-                    [PYTHON_CMD, '-X', 'utf8', main_file],
-                    cwd=work_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    text=True,
-                    bufsize=1,
-                    encoding='utf-8',
-                    errors='replace',
-                    shell=False
-                )
-            else:
-                proc = subprocess.Popen(
-                    [PYTHON_CMD, main_file],
-                    cwd=work_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    text=True,
-                    bufsize=1,
-                    encoding='utf-8',
-                    errors='replace',
-                    shell=False
-                )
+            proc = subprocess.Popen(
+                [PYTHON_CMD, main_file],
+                cwd=work_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                text=True,
+                bufsize=1,
+                encoding='utf-8',
+                errors='replace',
+                shell=False
+            )
 
             self.processes[deploy_id] = {
                 'process': proc,
@@ -794,7 +822,6 @@ class ProcessManager:
         return self.processes.get(deploy_id)
 
     def restore_all_bots(self, db):
-        """Server restartdan keyin barcha botlarni qayta ishga tushirish"""
         deploys = db.get_all_deploys()
         log.info(f"Restoring {len(deploys)} bots from database...")
         
@@ -808,7 +835,7 @@ class ProcessManager:
             token = deploy['bot_token']
             
             if not os.path.exists(work_dir) or not os.path.exists(main_file):
-                log.warning(f"Bot {deploy_id} fayllari topilmadi, o'tkazib yuboriladi")
+                log.warning(f"Bot {deploy_id} fayllari topilmadi")
                 db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message="Fayllar topilmadi")
                 failed += 1
                 continue
@@ -822,7 +849,7 @@ class ProcessManager:
                 log.error(f"Bot {deploy_id} qayta tiklanmadi: {msg}")
                 db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message=msg)
             
-            time.sleep(0.5)  # Rate limiting
+            time.sleep(0.5)
         
         log.info(f"Restore complete: {restored} restored, {failed} failed")
         return restored, failed
@@ -847,7 +874,7 @@ class ProcessManager:
 
 
 # ================================================================
-# TOKEN VALIDATOR
+# TOKEN VALIDATOR (AIoGRAM UCHUN)
 # ================================================================
 
 class TokenValidator:
@@ -855,7 +882,7 @@ class TokenValidator:
         self._cache = {}
         self._lock = threading.Lock()
 
-    def validate(self, token):
+    async def validate(self, token):
         if not token or len(token) < 30:
             return False, "Token juda qisqa!", None
         with self._lock:
@@ -864,25 +891,26 @@ class TokenValidator:
                 if time.time() - cached['time'] < 300:
                     return cached['valid'], cached['message'], cached['info']
         try:
-            bot = telebot.TeleBot(token)
-            info = bot.get_me()
-            result = {'id': info.id, 'username': info.username, 'first_name': info.first_name}
+            bot = Bot(token=token)
+            me = await bot.get_me()
+            await bot.session.close()
+            result = {'id': me.id, 'username': me.username, 'first_name': me.first_name}
             with self._lock:
-                self._cache[token] = {'valid': True, 'message': f"@{info.username}", 'info': result, 'time': time.time()}
-            return True, f"@{info.username}", result
+                self._cache[token] = {'valid': True, 'message': f"@{me.username}", 'info': result, 'time': time.time()}
+            return True, f"@{me.username}", result
         except Exception as e:
             msg = "Token noto'g'ri yoki eskirgan!" if 'Unauthorized' in str(e) else f"Xato: {str(e)[:50]}"
             with self._lock:
                 self._cache[token] = {'valid': False, 'message': msg, 'info': None, 'time': time.time()}
             return False, msg, None
 
-    def get_bot_username(self, token):
-        valid, msg, info = self.validate(token)
+    async def get_bot_username(self, token):
+        valid, msg, info = await self.validate(token)
         return info.get('username') if valid and info else None
 
 
 # ================================================================
-# DEPLOY ENGINE
+# DEPLOY ENGINE (ASYNCHRON)
 # ================================================================
 
 class DeployEngine:
@@ -892,20 +920,19 @@ class DeployEngine:
         self.tv = tv
         self.fh = FileHandler()
         self.ca = CodeAnalyzer()
-        self.user_states = {}
-        self._lock = threading.Lock()
+        self.user_data = {}
 
     def generate_deploy_id(self):
         return generate_id("dep", 10)
 
-    def deploy(self, user_id, file_path, bot_token):
+    async def deploy(self, user_id, file_path, bot_token):
         deploy_id = self.generate_deploy_id()
 
         valid, msg = self.fh.validate_file(file_path)
         if not valid:
             return None, msg, None
 
-        token_valid, token_msg, token_info = self.tv.validate(bot_token)
+        token_valid, token_msg, token_info = await self.tv.validate(bot_token)
         if not token_valid:
             return None, token_msg, None
 
@@ -965,7 +992,7 @@ class DeployEngine:
                             'last_active=? WHERE user_id=?', (now, user_id))
             return None, proc_msg, analysis
 
-    def stop_bot(self, deploy_id, user_id):
+    async def stop_bot(self, deploy_id, user_id):
         deploy = self.db.get_deploy(deploy_id)
         if not deploy or (deploy['user_id'] != user_id and user_id != OWNER_ID):
             return False, "Bot topilmadi yoki sizga tegishli emas"
@@ -974,7 +1001,7 @@ class DeployEngine:
             self.db.update_deploy_status(deploy_id, BOT_STATUS_STOPPED, stopped_at=str(datetime.now()))
         return success, msg
 
-    def restart_bot(self, deploy_id, user_id):
+    async def restart_bot(self, deploy_id, user_id):
         deploy = self.db.get_deploy(deploy_id)
         if not deploy or (deploy['user_id'] != user_id and user_id != OWNER_ID):
             return False, "Bot topilmadi"
@@ -988,7 +1015,7 @@ class DeployEngine:
             self.db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, restart_count=new_count, last_restart=now)
         return success, msg
 
-    def start_bot(self, deploy_id, user_id):
+    async def start_bot(self, deploy_id, user_id):
         deploy = self.db.get_deploy(deploy_id)
         if not deploy or (deploy['user_id'] != user_id and user_id != OWNER_ID):
             return False, "Bot topilmadi"
@@ -1006,7 +1033,7 @@ class DeployEngine:
             self.db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message=msg)
         return success, msg
 
-    def delete_bot(self, deploy_id, user_id):
+    async def delete_bot(self, deploy_id, user_id):
         deploy = self.db.get_deploy(deploy_id)
         if not deploy or (deploy['user_id'] != user_id and user_id != OWNER_ID):
             return False, "Bot topilmadi"
@@ -1016,7 +1043,7 @@ class DeployEngine:
                         (str(datetime.now()), user_id))
         return True, "Bot o'chirildi"
 
-    def get_bot_status(self, deploy_id):
+    async def get_bot_status(self, deploy_id):
         pm_status = self.pm.get_status(deploy_id)
         if not pm_status:
             deploy = self.db.get_deploy(deploy_id)
@@ -1035,38 +1062,23 @@ class DeployEngine:
                 'framework': deploy['framework'], 'created_at': deploy['created_at'],
                 'error_message': deploy['error_message']}
 
-    def get_user_bots(self, user_id, limit=50):
+    async def get_user_bots(self, user_id, limit=50):
         return self.db.get_user_deploys(user_id, limit)
 
-    def get_logs(self, deploy_id, limit=50):
+    async def get_logs(self, deploy_id, limit=50):
         return self.pm.get_logs(deploy_id, limit)
-
-    def set_user_state(self, user_id, state, data=None):
-        with self._lock:
-            self.user_states[user_id] = {'state': state, 'data': data or {}, 'updated': str(datetime.now())}
-
-    def get_user_state(self, user_id):
-        with self._lock:
-            return self.user_states.get(user_id)
-
-    def clear_user_state(self, user_id):
-        with self._lock:
-            state = self.user_states.get(user_id)
-            if state and state.get('data', {}).get('temp_dir'):
-                self.fh.cleanup(state['data']['temp_dir'])
-            if user_id in self.user_states:
-                del self.user_states[user_id]
 
 
 # ================================================================
-# SHABLONLAR
+# SHABLONLAR (AIoGRAM UCHUN QO'SHILDI)
 # ================================================================
 
 class TemplateManager:
     TEMPLATES = {
         'simple': {
-            'name': 'Simple Bot',
-            'description': 'Eng oddiy bot shabloni',
+            'name': 'Simple Bot (Telebot)',
+            'description': 'Eng oddiy telebot shabloni',
+            'framework': 'telebot',
             'code': '''import telebot
 
 BOT_TOKEN = "YOUR_TOKEN_HERE"
@@ -1085,61 +1097,122 @@ if __name__ == "__main__":
     bot.infinity_polling()
 ''',
         },
-        'menu': {
-            'name': 'Menu Bot',
-            'description': 'Menyu bilan bot shabloni',
-            'code': '''import telebot
-from telebot import types
+        'aiogram_simple': {
+            'name': 'Aiogram Simple Bot',
+            'description': 'Eng oddiy aiogram bot shabloni',
+            'framework': 'aiogram',
+            'code': '''import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 
 BOT_TOKEN = "YOUR_TOKEN_HERE"
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-@bot.message_handler(commands=['start'])
-def start(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("Boshlash", "Yordam")
-    markup.row("Haqida")
-    bot.send_message(message.chat.id, "Assalomu alaykum!", reply_markup=markup)
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    await message.answer("Assalomu alaykum! Men aiogram botman!")
 
-@bot.message_handler(func=lambda m: m.text == "Boshlash")
-def handle_start(m):
-    bot.send_message(m.chat.id, "Bot ishga tushdi!")
+@dp.message()
+async def echo(message: types.Message):
+    await message.answer(f"Siz yozdingiz: {message.text}")
 
-@bot.message_handler(func=lambda m: m.text == "Yordam")
-def handle_help(m):
-    bot.send_message(m.chat.id, "Yordam bo'limi")
+async def main():
+    print("Bot ishga tushdi...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    bot.infinity_polling()
+    asyncio.run(main())
 ''',
         },
-        'inline': {
-            'name': 'Inline Bot',
-            'description': 'Inline tugmalar bilan bot',
-            'code': '''import telebot
-from telebot import types
+        'aiogram_menu': {
+            'name': 'Aiogram Menu Bot',
+            'description': 'Menyu bilan aiogram bot',
+            'framework': 'aiogram',
+            'code': '''import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 BOT_TOKEN = "YOUR_TOKEN_HERE"
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-@bot.message_handler(commands=['start'])
-def start(message):
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("Tugma", callback_data="btn"))
-    bot.send_message(message.chat.id, "Inline tugmalar!", reply_markup=markup)
+menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Boshlash"), KeyboardButton(text="Yordam")],
+        [KeyboardButton(text="Haqida")]
+    ],
+    resize_keyboard=True
+)
 
-@bot.callback_query_handler(func=lambda c: True)
-def callback(c):
-    bot.answer_callback_query(c.id, "Bosildi!")
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    await message.answer("Assalomu alaykum! Men menu botman.", reply_markup=menu)
+
+@dp.message(lambda m: m.text == "Boshlash")
+async def handle_start(message: types.Message):
+    await message.answer("Bot ishga tushdi!")
+
+@dp.message(lambda m: m.text == "Yordam")
+async def handle_help(message: types.Message):
+    await message.answer("/start - Boshlash\\n/help - Yordam")
+
+@dp.message(lambda m: m.text == "Haqida")
+async def handle_about(message: types.Message):
+    await message.answer("Bu aiogram bot shabloni.")
+
+async def main():
+    print("Aiogram bot ishga tushdi...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    bot.infinity_polling()
+    asyncio.run(main())
+''',
+        },
+        'aiogram_inline': {
+            'name': 'Aiogram Inline Bot',
+            'description': 'Inline tugmalar bilan aiogram bot',
+            'framework': 'aiogram',
+            'code': '''import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+BOT_TOKEN = "YOUR_TOKEN_HERE"
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Tugma 1", callback_data="btn1")],
+        [InlineKeyboardButton(text="Tugma 2", callback_data="btn2")],
+        [InlineKeyboardButton(text="Sayt", url="https://example.com")]
+    ])
+    await message.answer("Inline tugmalar!", reply_markup=keyboard)
+
+@dp.callback_query()
+async def callback(callback: types.CallbackQuery):
+    if callback.data == "btn1":
+        await callback.answer("Tugma 1 bosildi!")
+    elif callback.data == "btn2":
+        await callback.answer("Tugma 2 bosildi!")
+    await callback.message.answer(f"{callback.data} tanlandi.")
+
+async def main():
+    print("Aiogram inline bot ishga tushdi...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ''',
         },
     }
 
     def get_template_list(self):
-        return [{'key': k, 'name': v['name'], 'description': v['description']} for k, v in self.TEMPLATES.items()]
+        return [{'key': k, 'name': v['name'], 'description': v['description'], 'framework': v.get('framework', 'telebot')} 
+                for k, v in self.TEMPLATES.items()]
 
     def get_template_code(self, key):
         tmpl = self.TEMPLATES.get(key)
@@ -1147,113 +1220,158 @@ if __name__ == "__main__":
 
 
 # ================================================================
-# ASOSIY BOT
+# ASOSIY BOT (AIoGRAM)
 # ================================================================
 
 class DeployBot:
     def __init__(self, token, owner_id):
         self.token = token
         self.owner_id = owner_id
-        self.bot = telebot.TeleBot(token)
+        self.bot = Bot(token=token)
+        self.dp = Dispatcher(storage=MemoryStorage())
         self.db = Database()
         self.pm = ProcessManager()
         self.tv = TokenValidator()
         self.engine = DeployEngine(self.db, self.pm, self.tv)
         self.templates = TemplateManager()
-        self._start_time = datetime.now()
+        self.start_time = datetime.now()
         self._setup_handlers()
         self._init_dirs()
-        # Server restartdan keyin avvalgi botlarni qayta ishga tushirish
-        self._restore_previous_bots()
-        log.info("DeployBot ishga tushdi")
+        log.info("DeployBot (Aiogram) ishga tushdi")
 
     def _init_dirs(self):
         for d in [DEPLOY_DIR, LOGS_DIR, TEMPLATES_DIR]:
             os.makedirs(d, exist_ok=True)
 
-    def _restore_previous_bots(self):
-        """Server restartdan keyin avvalgi botlarni qayta ishga tushirish"""
-        log.info("Avvalgi botlarni qayta tiklash boshlanmoqda...")
-        restored, failed = self.pm.restore_all_bots(self.db)
-        if restored > 0:
-            log.info(f"{restored} ta bot qayta tiklandi")
-        if failed > 0:
-            log.warning(f"{failed} ta bot qayta tiklanmadi")
-
-    def _setup_handlers(self):
-        bot = self.bot
-
-        @bot.message_handler(commands=['start'])
-        def _(m): self._start(m)
-
-        @bot.message_handler(commands=['help'])
-        def _(m): self._help(m)
-
-        @bot.message_handler(commands=['mybots'])
-        def _(m): self._my_bots(m)
-
-        @bot.message_handler(commands=['stop'])
-        def _(m): self._stop_cmd(m)
-
-        @bot.message_handler(commands=['restart'])
-        def _(m): self._restart_cmd(m)
-
-        @bot.message_handler(commands=['logs'])
-        def _(m): self._logs_cmd(m)
-
-        @bot.message_handler(commands=['delete'])
-        def _(m): self._delete_cmd(m)
-
-        @bot.message_handler(commands=['stats'])
-        def _(m): self._stats_cmd(m)
-
-        @bot.message_handler(commands=['templates'])
-        def _(m): self._templates_cmd(m)
-
-        @bot.message_handler(commands=['cancel'])
-        def _(m): self._cancel(m)
-
-        @bot.callback_query_handler(func=lambda c: True)
-        def _(c): self._callback(c)
-
-        @bot.message_handler(content_types=['document'])
-        def _(m): self._handle_file(m)
-
-        @bot.message_handler(func=lambda m: True, content_types=['text'])
-        def _(m): self._handle_text(m)
-
     def _ikb(self, btns, width=2):
-        markup = types.InlineKeyboardMarkup(row_width=width)
-        for b in btns:
-            if isinstance(b, list):
-                markup.row(*[types.InlineKeyboardButton(t, callback_data=d) for t, d in b])
-            elif isinstance(b, tuple):
-                markup.add(types.InlineKeyboardButton(b[0], callback_data=b[1]))
-        return markup
+        """Inline keyboard yaratish"""
+        keyboard = []
+        row = []
+        for i, (text, callback) in enumerate(btns):
+            row.append(InlineKeyboardButton(text=text, callback_data=callback))
+            if (i + 1) % width == 0:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     def _rkb(self, rows):
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        for r in rows:
-            markup.row(*r)
-        return markup
+        """Reply keyboard yaratish"""
+        keyboard = []
+        for row in rows:
+            keyboard.append([KeyboardButton(text=btn) for btn in row])
+        return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
-    def _start(self, m):
-        uid = m.from_user.id
-        self.db.register_user(uid, m.from_user.username, m.from_user.first_name)
-        self.engine.clear_user_state(uid)
+    def _setup_handlers(self):
+        dp = self.dp
+
+        # FSM handlerlar
+        @dp.message(Command("start"))
+        async def start_cmd(message: types.Message, state: FSMContext):
+            await self._start(message, state)
+
+        @dp.message(Command("help"))
+        async def help_cmd(message: types.Message):
+            await self._help(message)
+
+        @dp.message(Command("mybots"))
+        async def mybots_cmd(message: types.Message):
+            await self._my_bots(message)
+
+        @dp.message(Command("stop"))
+        async def stop_cmd(message: types.Message):
+            await self._stop_cmd(message)
+
+        @dp.message(Command("restart"))
+        async def restart_cmd(message: types.Message):
+            await self._restart_cmd(message)
+
+        @dp.message(Command("logs"))
+        async def logs_cmd(message: types.Message):
+            await self._logs_cmd(message)
+
+        @dp.message(Command("delete"))
+        async def delete_cmd(message: types.Message):
+            await self._delete_cmd(message)
+
+        @dp.message(Command("stats"))
+        async def stats_cmd(message: types.Message):
+            await self._stats_cmd(message)
+
+        @dp.message(Command("templates"))
+        async def templates_cmd(message: types.Message):
+            await self._templates_cmd(message)
+
+        @dp.message(Command("cancel"))
+        async def cancel_cmd(message: types.Message, state: FSMContext):
+            await self._cancel(message, state)
+
+        @dp.callback_query()
+        async def callback_handler(callback: types.CallbackQuery, state: FSMContext):
+            await self._callback(callback, state)
+
+        @dp.message(lambda m: m.document)
+        async def file_handler(message: types.Message, state: FSMContext):
+            await self._handle_file(message, state)
+
+        @dp.message(lambda m: m.text and m.text.startswith(EMOJI_FILE))
+        async def upload_request(message: types.Message, state: FSMContext):
+            await self._send_upload_request(message, state)
+
+        @dp.message(lambda m: m.text == f"{EMOJI_LIST} Mening botlarim")
+        async def my_bots_text(message: types.Message):
+            await self._my_bots(message)
+
+        @dp.message(lambda m: m.text == f"{EMOJI_STAR} Shablonlar")
+        async def templates_text(message: types.Message):
+            await self._templates_cmd(message)
+
+        @dp.message(lambda m: m.text == f"{EMOJI_CHART} Statistika")
+        async def stats_text(message: types.Message):
+            if message.from_user.id == self.owner_id:
+                await self._stats_cmd(message)
+            else:
+                await message.answer(f"{EMOJI_LOCK} Faqat owner uchun!")
+
+        @dp.message(lambda m: m.text == f"{EMOJI_QUESTION} Yordam")
+        async def help_text(message: types.Message):
+            await self._help(message)
+
+        @dp.message(lambda m: m.text == f"{EMOJI_PEN} Xabar yozish")
+        async def write_message(message: types.Message):
+            await message.answer(f"{EMOJI_PEN} XABAR YOZISH\n\nBot egasiga xabar yozing:")
+            self.dp.message.register(self._msg_save)
+
+        @dp.message(lambda m: m.text == f"{EMOJI_CROSS} Bekor qilish")
+        async def cancel_text(message: types.Message, state: FSMContext):
+            await self._cancel(message, state)
+
+        @dp.message()
+        async def unknown_message(message: types.Message, state: FSMContext):
+            current_state = await state.get_state()
+            if current_state == DeployStates.waiting_for_token.state:
+                await self._receive_token(message, state)
+            else:
+                await message.answer(f"{EMOJI_QUESTION} Noma'lum buyruq. Yordam uchun /help")
+
+    async def _start(self, message: types.Message, state: FSMContext):
+        uid = message.from_user.id
+        self.db.register_user(uid, message.from_user.username, message.from_user.first_name)
+        await state.clear()
 
         if self.db.is_user_banned(uid):
-            self.bot.reply_to(m, f"{EMOJI_LOCK} Siz bloklangansiz.")
+            await message.answer(f"{EMOJI_LOCK} Siz bloklangansiz.")
             return
 
         self.db.update_user_activity(uid)
 
-        username = m.from_user.username
-        ui = f"@{username}" if username else m.from_user.first_name
+        username = message.from_user.username
+        ui = f"@{username}" if username else message.from_user.first_name
         bots_count = self.db.count('deployments', 'user_id=?', (uid,))
 
         text = f"""
-{EMOJI_ROCKET} BOT DEPLOY BOT
+{EMOJI_ROCKET} BOT DEPLOY BOT (Aiogram)
 {'=' * 35}
 
 Assalomu alaykum, {ui}!
@@ -1278,9 +1396,9 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
             [f"{EMOJI_LIST} Mening botlarim", f"{EMOJI_CHART} Statistika"],
             [f"{EMOJI_QUESTION} Yordam", f"{EMOJI_PEN} Xabar yozish"]
         ])
-        self.bot.send_message(m.chat.id, text, reply_markup=markup)
+        await message.answer(text, reply_markup=markup)
 
-    def _help(self, m):
+    async def _help(self, message: types.Message):
         text = f"""
 {EMOJI_QUESTION} YORDAM
 {'=' * 35}
@@ -1294,7 +1412,7 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
 
 {EMOJI_FILE} FAYL TALABLARI:
   {EMOJI_CHECK} .py fayl bo'lishi shart
-  {EMOJI_CHECK} telebot import bor
+  {EMOJI_CHECK} telebot yoki aiogram import bor
   {EMOJI_CHECK} Maksimal hajm: {format_size(MAX_FILE_SIZE)}
 
 {EMOJI_KEY} TOKEN QAYERDAN OLINADI?
@@ -1312,14 +1430,14 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
   /templates - Shablonlar
   /cancel - Bekor qilish
 """
-        self.bot.reply_to(m, text)
+        await message.answer(text)
 
-    def _my_bots(self, m):
-        uid = m.from_user.id
-        bots = self.engine.get_user_bots(uid)
+    async def _my_bots(self, message: types.Message):
+        uid = message.from_user.id
+        bots = await self.engine.get_user_bots(uid)
 
         if not bots:
-            self.bot.reply_to(m, f"{EMOJI_LIST} Sizda hali botlar yo'q!")
+            await message.answer(f"{EMOJI_LIST} Sizda hali botlar yo'q!")
             return
 
         text = f"{EMOJI_LIST} SIZNING BOTLARINGIZ ({len(bots)} ta):\n"
@@ -1331,22 +1449,22 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
             bot_uname = b['bot_username'] or 'Bot'
             icon = EMOJI_GREEN if status == BOT_STATUS_RUNNING else EMOJI_RED
 
-            st = self.engine.get_bot_status(did)
+            st = await self.engine.get_bot_status(did)
             uptime_str = format_uptime(st['uptime_seconds']) if st else NA_TEXT
 
             text += f"\n{icon} @{bot_uname}\n"
             text += f"   ID: {did}\n"
             text += f"   {EMOJI_CLOCK} Uptime: {uptime_str}\n"
 
-            btns.append([(f"{icon} @{bot_uname}", f"bot_{did}")])
+            btns.append((f"{icon} @{bot_uname}", f"bot_{did}"))
 
         text += f"\n{EMOJI_ARROW} Botni tanlang:"
-        self.bot.send_message(m.chat.id, text, reply_markup=self._ikb(btns, 1))
+        await message.answer(text, reply_markup=self._ikb(btns, 1))
 
-    def _bot_details(self, c, deploy_id):
-        st = self.engine.get_bot_status(deploy_id)
+    async def _bot_details(self, callback: types.CallbackQuery, deploy_id: str):
+        st = await self.engine.get_bot_status(deploy_id)
         if not st:
-            self.bot.answer_callback_query(c.id, "Bot topilmadi!")
+            await callback.answer("Bot topilmadi!", show_alert=True)
             return
 
         if st['status'] == BOT_STATUS_RUNNING:
@@ -1382,54 +1500,48 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
 
         btns = []
         if st['status'] == BOT_STATUS_STOPPED:
-            btns.append([(f"{EMOJI_PLAY} Ishga tushirish", f"start_{deploy_id}")])
+            btns.append((f"{EMOJI_PLAY} Ishga tushirish", f"start_{deploy_id}"))
         btns.extend([
-            [(f"{EMOJI_RESTART} Qayta ishga tushirish", f"restart_{deploy_id}")],
-            [(f"{EMOJI_STOP} To'xtatish", f"stop_{deploy_id}")],
-            [(f"{EMOJI_LIST} Loglar", f"logs_{deploy_id}")],
-            [(f"{EMOJI_TRASH} O'chirish", f"del_{deploy_id}")],
-            [(f"{EMOJI_BACK} Orqaga", "back_to_bots")],
+            (f"{EMOJI_RESTART} Qayta ishga tushirish", f"restart_{deploy_id}"),
+            (f"{EMOJI_STOP} To'xtatish", f"stop_{deploy_id}"),
+            (f"{EMOJI_LIST} Loglar", f"logs_{deploy_id}"),
+            (f"{EMOJI_TRASH} O'chirish", f"del_{deploy_id}"),
+            (f"{EMOJI_BACK} Orqaga", "back_to_bots"),
         ])
 
-        try:
-            self.bot.edit_message_text(text, c.message.chat.id, c.message.message_id, reply_markup=self._ikb(btns, 1))
-        except Exception:
-            self.bot.send_message(c.message.chat.id, text, reply_markup=self._ikb(btns, 1))
-        self.bot.answer_callback_query(c.id)
+        await callback.message.edit_text(text, reply_markup=self._ikb(btns, 1))
+        await callback.answer()
 
-    def _bot_action(self, c, deploy_id, action):
-        uid = c.from_user.id
+    async def _bot_action(self, callback: types.CallbackQuery, deploy_id: str, action: str):
+        uid = callback.from_user.id
 
         if action == 'start':
-            success, msg = self.engine.start_bot(deploy_id, uid)
+            success, msg = await self.engine.start_bot(deploy_id, uid)
         elif action == 'stop':
-            success, msg = self.engine.stop_bot(deploy_id, uid)
+            success, msg = await self.engine.stop_bot(deploy_id, uid)
         elif action == 'restart':
-            success, msg = self.engine.restart_bot(deploy_id, uid)
+            success, msg = await self.engine.restart_bot(deploy_id, uid)
         elif action == 'del':
-            success, msg = self.engine.delete_bot(deploy_id, uid)
+            success, msg = await self.engine.delete_bot(deploy_id, uid)
             if success:
-                self.bot.answer_callback_query(c.id, f"{EMOJI_CHECK} Bot o'chirildi!")
-                try:
-                    self.bot.edit_message_text(f"{EMOJI_TRASH} Bot o'chirildi!", c.message.chat.id, c.message.message_id)
-                except Exception:
-                    pass
+                await callback.answer(f"{EMOJI_CHECK} Bot o'chirildi!", show_alert=True)
+                await callback.message.edit_text(f"{EMOJI_TRASH} Bot o'chirildi!")
                 return
             else:
-                self.bot.answer_callback_query(c.id, f"{EMOJI_CROSS} {msg}")
+                await callback.answer(f"{EMOJI_CROSS} {msg}", show_alert=True)
                 return
         else:
             return
 
-        self.bot.answer_callback_query(c.id, f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
+        await callback.answer(f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
         if action in ('start', 'stop', 'restart'):
-            time.sleep(0.5)
-            self._bot_details(c, deploy_id)
+            await asyncio.sleep(0.5)
+            await self._bot_details(callback, deploy_id)
 
-    def _show_logs(self, c, deploy_id):
-        logs = self.engine.get_logs(deploy_id, limit=30)
+    async def _show_logs(self, callback: types.CallbackQuery, deploy_id: str):
+        logs = await self.engine.get_logs(deploy_id, limit=30)
         if not logs:
-            self.bot.answer_callback_query(c.id, "Loglar yo'q!")
+            await callback.answer("Loglar yo'q!", show_alert=True)
             return
 
         text = f"{EMOJI_LIST} LOGLAR:\n\n"
@@ -1437,21 +1549,19 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
             line = l[:200] if len(l) > 200 else l
             text += f"│ {line}\n"
 
-        try:
-            self.bot.edit_message_text(truncate_text(text), c.message.chat.id, c.message.message_id,
-                                       reply_markup=self._ikb([(f"{EMOJI_BACK} Orqaga", f"bot_{deploy_id}")], 1))
-        except Exception:
-            self.bot.send_message(c.message.chat.id, truncate_text(text),
-                                  reply_markup=self._ikb([(f"{EMOJI_BACK} Orqaga", f"bot_{deploy_id}")], 1))
-        self.bot.answer_callback_query(c.id)
+        await callback.message.edit_text(
+            truncate_text(text),
+            reply_markup=self._ikb([(f"{EMOJI_BACK} Orqaga", f"bot_{deploy_id}")], 1)
+        )
+        await callback.answer()
 
-    def _stats_cmd(self, m):
-        if m.from_user.id != self.owner_id:
-            self.bot.reply_to(m, f"{EMOJI_LOCK} Faqat owner uchun!")
+    async def _stats_cmd(self, message: types.Message):
+        if message.from_user.id != self.owner_id:
+            await message.answer(f"{EMOJI_LOCK} Faqat owner uchun!")
             return
 
         stats = self.db.get_stats_summary()
-        uptime = int((datetime.now() - self._start_time).total_seconds())
+        uptime = int((datetime.now() - self.start_time).total_seconds())
 
         text = f"""
 {EMOJI_CHART} UMUMIY STATISTIKA
@@ -1469,43 +1579,47 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
   Muvaffaqiyatli: {stats['today'].get('successful', 0)}
   Yangi foydalanuvchilar: {stats['today'].get('new_users', 0)}
 """
-        self.bot.reply_to(m, text)
+        await message.answer(text)
 
-    def _templates_cmd(self, m):
+    async def _templates_cmd(self, message: types.Message):
         templates = self.templates.get_template_list()
         text = f"{EMOJI_STAR} BOT SHABLONLARI\n\n"
         btns = []
 
         for tmpl in templates:
-            text += f"{EMOJI_PAGE} {tmpl['name']}\n   {tmpl['description']}\n\n"
-            btns.append([(f"{EMOJI_STAR} {tmpl['name']}", f"tmpl_{tmpl['key']}")])
+            framework_icon = "🤖" if tmpl['framework'] == 'aiogram' else "📦"
+            text += f"{framework_icon} {tmpl['name']}\n   {tmpl['description']}\n\n"
+            btns.append((f"{framework_icon} {tmpl['name']}", f"tmpl_{tmpl['key']}"))
 
-        btns.append([(f"{EMOJI_BACK} Orqaga", "back_to_menu")])
-        self.bot.send_message(m.chat.id, text, reply_markup=self._ikb(btns, 1))
+        btns.append((f"{EMOJI_BACK} Orqaga", "back_to_menu"))
+        await message.answer(text, reply_markup=self._ikb(btns, 1))
 
-    def _send_template(self, c, tmpl_key):
+    async def _send_template(self, callback: types.CallbackQuery, tmpl_key: str):
         code = self.templates.get_template_code(tmpl_key)
         if not code:
-            self.bot.answer_callback_query(c.id, "Shablon topilmadi!")
+            await callback.answer("Shablon topilmadi!", show_alert=True)
             return
 
-        temp_file = self.engine.fh.create_temp_dir('template_')
+        temp_file = tempfile.mkdtemp(prefix='template_')
         file_path = os.path.join(temp_file, f"{tmpl_key}.py")
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(code)
 
         try:
             with open(file_path, 'rb') as f:
-                self.bot.send_document(c.message.chat.id, f, caption=f"{EMOJI_STAR} {tmpl_key}.py shabloni")
+                await callback.message.answer_document(
+                    types.FSInputFile(file_path, filename=f"{tmpl_key}.py"),
+                    caption=f"{EMOJI_STAR} {tmpl_key}.py shabloni"
+                )
         except Exception as e:
-            self.bot.send_message(c.message.chat.id, f"{EMOJI_CROSS} Fayl yuborilmadi: {e}\n\n```\n{code}\n```")
+            await callback.message.answer(f"{EMOJI_CROSS} Fayl yuborilmadi: {e}\n\n```\n{code}\n```")
         finally:
-            self.engine.fh.cleanup(temp_file)
+            shutil.rmtree(temp_file, ignore_errors=True)
 
-        self.bot.answer_callback_query(c.id)
+        await callback.answer()
 
-    def _send_upload_request(self, m):
-        self.engine.set_user_state(m.from_user.id, STATE_AWAITING_FILE)
+    async def _send_upload_request(self, message: types.Message, state: FSMContext):
+        await state.set_state(DeployStates.waiting_for_file)
 
         text = f"""
 {EMOJI_FILE} FAYL YUBORISH
@@ -1520,330 +1634,288 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
 {EMOJI_INFO} Masalan: mybot.py
 """
         markup = self._rkb([[f"{EMOJI_CROSS} Bekor qilish"]])
-        self.bot.send_message(m.chat.id, text, reply_markup=markup)
+        await message.answer(text, reply_markup=markup)
 
-    def _handle_file(self, m):
-        uid = m.from_user.id
+    async def _handle_file(self, message: types.Message, state: FSMContext):
+        uid = message.from_user.id
 
         if self.db.is_user_banned(uid):
-            self.bot.reply_to(m, f"{EMOJI_LOCK} Siz bloklangansiz.")
+            await message.answer(f"{EMOJI_LOCK} Siz bloklangansiz.")
             return
 
-        state = self.engine.get_user_state(uid)
-        if not state or state.get('state') != STATE_AWAITING_FILE:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} Avval \"{EMOJI_FILE} Fayl yuborin\" tugmasini bosing!")
+        current_state = await state.get_state()
+        if current_state != DeployStates.waiting_for_file.state:
+            await message.answer(f"{EMOJI_CROSS} Avval \"{EMOJI_FILE} Fayl yuborin\" tugmasini bosing!")
             return
 
-        if not m.document:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} Iltimos, fayl yuboring!")
+        if not message.document:
+            await message.answer(f"{EMOJI_CROSS} Iltimos, fayl yuboring!")
             return
 
-        filename = m.document.file_name or ""
+        filename = message.document.file_name or ""
         ext = os.path.splitext(filename)[1].lower()
 
         if ext not in ALLOWED_EXTENSIONS:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} Faqat .py fayllar qabul qilinadi!\nMasalan: mybot.py")
+            await message.answer(f"{EMOJI_CROSS} Faqat .py fayllar qabul qilinadi!\nMasalan: mybot.py")
             return
 
-        if m.document.file_size and m.document.file_size > MAX_FILE_SIZE:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} Fayl juda katta!\nMaksimal: {format_size(MAX_FILE_SIZE)}")
+        if message.document.file_size and message.document.file_size > MAX_FILE_SIZE:
+            await message.answer(f"{EMOJI_CROSS} Fayl juda katta!\nMaksimal: {format_size(MAX_FILE_SIZE)}")
             return
 
-        temp_dir = self.engine.fh.create_temp_dir('bot_file_')
-        if not temp_dir:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} Vaqtinchalik papka yaratilmadi!")
-            return
-
+        temp_dir = tempfile.mkdtemp(prefix='bot_file_')
         file_path = os.path.join(temp_dir, safe_filename(filename))
 
         try:
-            file_info = self.bot.get_file(m.document.file_id)
-            downloaded = self.bot.download_file(file_info.file_path)
+            file_info = await self.bot.get_file(message.document.file_id)
+            downloaded = await self.bot.download_file(file_info.file_path)
             with open(file_path, 'wb') as f:
-                f.write(downloaded)
+                f.write(downloaded.getvalue())
         except Exception as e:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} Faylni yuklab bo'lmadi: {str(e)[:80]}")
-            self.engine.fh.cleanup(temp_dir)
+            await message.answer(f"{EMOJI_CROSS} Faylni yuklab bo'lmadi: {str(e)[:80]}")
+            shutil.rmtree(temp_dir, ignore_errors=True)
             return
 
-        valid, msg = self.engine.fh.validate_file(file_path)
+        valid, msg = self.fh.validate_file(file_path)
         if not valid:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} {msg}")
-            self.engine.fh.cleanup(temp_dir)
+            await message.answer(f"{EMOJI_CROSS} {msg}")
+            shutil.rmtree(temp_dir, ignore_errors=True)
             return
 
-        analysis = self.engine.ca.analyze_code(file_path)
-        analysis_text = self.engine.ca.get_analysis_text(analysis)
+        analysis = self.ca.analyze_code(file_path)
+        analysis_text = self.ca.get_analysis_text(analysis)
 
         if not analysis['valid']:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} Kodda xatoliklar bor:\n\n{analysis_text}")
-            self.engine.fh.cleanup(temp_dir)
+            await message.answer(f"{EMOJI_CROSS} Kodda xatoliklar bor:\n\n{analysis_text}")
+            shutil.rmtree(temp_dir, ignore_errors=True)
             return
 
-        self.bot.send_message(m.chat.id, f"{EMOJI_CHECK} Fayl yuklandi!\n\n{analysis_text}\n\nDavom etish uchun token yuboring.")
+        await message.answer(f"{EMOJI_CHECK} Fayl yuklandi!\n\n{analysis_text}\n\nDavom etish uchun token yuboring.")
 
-        self.engine.set_user_state(uid, STATE_AWAITING_TOKEN, {
+        await state.update_data({
             'file_path': file_path,
             'temp_dir': temp_dir,
             'analysis': analysis,
             'filename': filename,
         })
+        await state.set_state(DeployStates.waiting_for_token)
 
-        self.bot.send_message(m.chat.id, f"{EMOJI_KEY} BOT TOKEN\n\n@BotFather dan olgan tokeningizni yuboring.")
+        await message.answer(f"{EMOJI_KEY} BOT TOKEN\n\n@BotFather dan olgan tokeningizni yuboring.")
 
-    def _receive_token(self, m):
-        uid = m.from_user.id
-        state = self.engine.get_user_state(uid)
-
-        if not state or state.get('state') != STATE_AWAITING_TOKEN:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} Jarayon buzildi. Qaytadan boshlang.")
+    async def _receive_token(self, message: types.Message, state: FSMContext):
+        data = await state.get_data()
+        if not data:
+            await message.answer(f"{EMOJI_CROSS} Jarayon buzildi. Qaytadan boshlang.")
+            await state.clear()
             return
 
-        token = m.text.strip().replace(' ', '').replace('\n', '')
+        token = message.text.strip().replace(' ', '').replace('\n', '')
 
         if not token:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} Token bo'sh!")
+            await message.answer(f"{EMOJI_CROSS} Token bo'sh!")
             return
 
         if len(token) < 30:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} Token juda qisqa!")
+            await message.answer(f"{EMOJI_CROSS} Token juda qisqa!")
             return
 
-        progress = self.bot.send_message(m.chat.id, f"{EMOJI_HOURGLASS} Deploy qilinmoqda...")
+        progress = await message.answer(f"{EMOJI_HOURGLASS} Deploy qilinmoqda...")
 
         try:
-            result = self.engine.deploy(uid, state['data']['file_path'], token)
+            result = await self.engine.deploy(
+                message.from_user.id,
+                data['file_path'],
+                token
+            )
         except Exception as e:
             log.error(f"Deploy xatosi: {e}")
             result = (None, f"Xato: {str(e)[:100]}", None)
 
-        temp_dir = state['data'].get('temp_dir')
+        temp_dir = data.get('temp_dir')
         if temp_dir and os.path.exists(temp_dir):
-            self.engine.fh.cleanup(temp_dir)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
         deploy_id, proc_msg, analysis = result
 
         if deploy_id is None:
-            self.bot.edit_message_text(
-                f"{EMOJI_CROSS} DEPLOY MUVAFFAQIYATSIZ\n\nSabab: {proc_msg}",
-                progress.chat.id, progress.message_id
+            await progress.edit_text(
+                f"{EMOJI_CROSS} DEPLOY MUVAFFAQIYATSIZ\n\nSabab: {proc_msg}"
             )
         else:
-            filename = state['data'].get('filename', 'bot.py')
+            filename = data.get('filename', 'bot.py')
             lines = analysis['line_count'] if analysis else 0
 
-            self.bot.edit_message_text(
+            await progress.edit_text(
                 f"{EMOJI_CHECK} DEPLOY MUVAFFAQIYATLI!\n\n"
                 f"{EMOJI_INFO} Bot ID: {deploy_id}\n"
                 f"{EMOJI_PAGE} Fayl: {filename}\n"
                 f"{EMOJI_SIZE} Qatorlar: {lines}\n\n"
                 f"{EMOJI_GREEN} Bot ishga tushdi va tayyor!\n"
                 f"{EMOJI_INFO} Loglarni /logs buyrug'i bilan ko'ring.",
-                progress.chat.id, progress.message_id,
                 reply_markup=self._ikb([(f"{EMOJI_LIST} Botni ko'rish", f"bot_{deploy_id}")], 1)
             )
 
-        self.engine.clear_user_state(uid)
+        await state.clear()
 
-    def _cancel(self, m):
-        self.engine.clear_user_state(m.from_user.id)
-        self.bot.reply_to(m, f"{EMOJI_CROSS} Jarayon bekor qilindi!",
-                          reply_markup=self._rkb([[f"{EMOJI_FILE} Fayl yuborin"], [f"{EMOJI_LIST} Mening botlarim"], [f"{EMOJI_QUESTION} Yordam"]]))
+    async def _cancel(self, message: types.Message, state: FSMContext):
+        data = await state.get_data()
+        if data and data.get('temp_dir'):
+            shutil.rmtree(data['temp_dir'], ignore_errors=True)
+        await state.clear()
+        await message.answer(
+            f"{EMOJI_CROSS} Jarayon bekor qilindi!",
+            reply_markup=self._rkb([[f"{EMOJI_FILE} Fayl yuborin"], [f"{EMOJI_LIST} Mening botlarim"], [f"{EMOJI_QUESTION} Yordam"]])
+        )
 
-    def _callback(self, c):
-        data = c.data
+    async def _callback(self, callback: types.CallbackQuery, state: FSMContext):
+        data = callback.data
 
         try:
             if data == "upload_file":
-                self._send_upload_request(c.message)
-                self.bot.answer_callback_query(c.id)
+                await self._send_upload_request(callback.message, state)
+                await callback.answer()
 
             elif data == "back_to_bots":
-                self._my_bots(c.message)
-                self.bot.answer_callback_query(c.id)
+                await self._my_bots(callback.message)
+                await callback.answer()
 
             elif data == "back_to_menu":
-                self._start(c.message)
-                self.bot.answer_callback_query(c.id)
+                await self._start(callback.message, state)
+                await callback.answer()
 
             elif data.startswith("bot_"):
-                self._bot_details(c, data[4:])
+                await self._bot_details(callback, data[4:])
 
             elif data.startswith("restart_"):
-                self._bot_action(c, data[8:], "restart")
+                await self._bot_action(callback, data[8:], "restart")
 
             elif data.startswith("stop_"):
-                self._bot_action(c, data[5:], "stop")
+                await self._bot_action(callback, data[5:], "stop")
 
             elif data.startswith("start_"):
-                self._bot_action(c, data[6:], "start")
+                await self._bot_action(callback, data[6:], "start")
 
             elif data.startswith("del_"):
-                self._bot_action(c, data[4:], "del")
+                await self._bot_action(callback, data[4:], "del")
 
             elif data.startswith("logs_"):
-                self._show_logs(c, data[5:])
+                await self._show_logs(callback, data[5:])
 
             elif data.startswith("tmpl_"):
-                self._send_template(c, data[5:])
+                await self._send_template(callback, data[5:])
 
             else:
-                self.bot.answer_callback_query(c.id)
+                await callback.answer()
 
         except Exception as e:
             log.error(f"Callback xatosi: {e}")
-            self.bot.answer_callback_query(c.id, f"{EMOJI_CROSS} Xatolik!")
+            await callback.answer(f"{EMOJI_CROSS} Xatolik!", show_alert=True)
 
-    def _handle_text(self, m):
-        uid = m.from_user.id
-        state = self.engine.get_user_state(uid)
-        text = m.text
-
-        if text == "/cancel":
-            self._cancel(m)
-            return
-
-        if state and state.get('state') == STATE_AWAITING_TOKEN:
-            self._receive_token(m)
-            return
-
-        if text == f"{EMOJI_FILE} Fayl yuborin":
-            self._send_upload_request(m)
-            return
-
-        if text == f"{EMOJI_LIST} Mening botlarim":
-            self._my_bots(m)
-            return
-
-        if text == f"{EMOJI_STAR} Shablonlar":
-            self._templates_cmd(m)
-            return
-
-        if text == f"{EMOJI_CHART} Statistika":
-            if uid == self.owner_id:
-                self._stats_cmd(m)
-            else:
-                self.bot.reply_to(m, f"{EMOJI_LOCK} Faqat owner uchun!")
-            return
-
-        if text == f"{EMOJI_QUESTION} Yordam":
-            self._help(m)
-            return
-
-        if text == f"{EMOJI_PEN} Xabar yozish":
-            msg = self.bot.reply_to(m, f"{EMOJI_PEN} XABAR YOZISH\n\nBot egasiga xabar yozing:")
-            self.bot.register_next_step_handler(msg, self._msg_save)
-            return
-
-        if text == f"{EMOJI_CROSS} Bekor qilish":
-            self._cancel(m)
-            return
-
-        if text and text.startswith('/'):
-            return
-
-        self.bot.reply_to(m, f"{EMOJI_QUESTION} Noma'lum buyruq. Yordam uchun /help")
-
-    def _msg_save(self, m):
-        if not m.text or not m.text.strip():
-            self.bot.reply_to(m, f"{EMOJI_CROSS} Xabar bo'sh!")
+    async def _msg_save(self, message: types.Message):
+        if not message.text or not message.text.strip():
+            await message.answer(f"{EMOJI_CROSS} Xabar bo'sh!")
             return
 
         now = str(datetime.now())
-        uid = m.from_user.id
-        username = m.from_user.username or ''
+        uid = message.from_user.id
+        username = message.from_user.username or ''
 
         self.db.execute(
             'INSERT INTO user_messages (user_id, username, message_text, created_at, status) VALUES (?, ?, ?, ?, ?)',
-            (uid, username, m.text.strip(), now, 'pending')
+            (uid, username, message.text.strip(), now, 'pending')
         )
 
-        self.bot.reply_to(m, f"{EMOJI_CHECK} Xabar qabul qilindi!")
+        await message.answer(f"{EMOJI_CHECK} Xabar qabul qilindi!")
 
         try:
-            self.bot.send_message(self.owner_id,
-                f"{EMOJI_MESSAGE} YANGI XABAR!\n\n👤 @{username}\n🆔 {uid}\n📝 {m.text.strip()}")
+            await self.bot.send_message(
+                self.owner_id,
+                f"{EMOJI_MESSAGE} YANGI XABAR!\n\n👤 @{username}\n🆔 {uid}\n📝 {message.text.strip()}"
+            )
         except Exception:
             pass
 
-    def _stop_cmd(self, m):
-        msg = self.bot.reply_to(m, f"{EMOJI_STOP} To'xtatmoqchi bot ID sini yuboring:")
-        self.bot.register_next_step_handler(msg, self._stop_exec)
+    async def _stop_cmd(self, message: types.Message):
+        await message.answer(f"{EMOJI_STOP} To'xtatmoqchi bot ID sini yuboring:")
+        self.dp.message.register(self._stop_exec, lambda m: m.text and not m.text.startswith('/'))
 
-    def _stop_exec(self, m):
-        did = m.text.strip()
+    async def _stop_exec(self, message: types.Message):
+        did = message.text.strip()
         if not did:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} ID bo'sh!")
+            await message.answer(f"{EMOJI_CROSS} ID bo'sh!")
             return
-        success, msg = self.engine.stop_bot(did, m.from_user.id)
-        self.bot.reply_to(m, f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
+        success, msg = await self.engine.stop_bot(did, message.from_user.id)
+        await message.answer(f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
 
-    def _restart_cmd(self, m):
-        msg = self.bot.reply_to(m, f"{EMOJI_RESTART} Qayta ishga tushirmoqchi bot ID sini yuboring:")
-        self.bot.register_next_step_handler(msg, self._restart_exec)
+    async def _restart_cmd(self, message: types.Message):
+        await message.answer(f"{EMOJI_RESTART} Qayta ishga tushirmoqchi bot ID sini yuboring:")
+        self.dp.message.register(self._restart_exec, lambda m: m.text and not m.text.startswith('/'))
 
-    def _restart_exec(self, m):
-        did = m.text.strip()
+    async def _restart_exec(self, message: types.Message):
+        did = message.text.strip()
         if not did:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} ID bo'sh!")
+            await message.answer(f"{EMOJI_CROSS} ID bo'sh!")
             return
-        success, msg = self.engine.restart_bot(did, m.from_user.id)
-        self.bot.reply_to(m, f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
+        success, msg = await self.engine.restart_bot(did, message.from_user.id)
+        await message.answer(f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
 
-    def _logs_cmd(self, m):
-        msg = self.bot.reply_to(m, f"{EMOJI_LIST} Loglarini ko'rishmoqchi bot ID sini yuboring:")
-        self.bot.register_next_step_handler(msg, self._logs_exec)
+    async def _logs_cmd(self, message: types.Message):
+        await message.answer(f"{EMOJI_LIST} Loglarini ko'rishmoqchi bot ID sini yuboring:")
+        self.dp.message.register(self._logs_exec, lambda m: m.text and not m.text.startswith('/'))
 
-    def _logs_exec(self, m):
-        did = m.text.strip()
+    async def _logs_exec(self, message: types.Message):
+        did = message.text.strip()
         if not did:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} ID bo'sh!")
+            await message.answer(f"{EMOJI_CROSS} ID bo'sh!")
             return
-        logs = self.engine.get_logs(did, limit=30)
+        logs = await self.engine.get_logs(did, limit=30)
         if not logs:
-            self.bot.reply_to(m, f"{EMOJI_LIST} Loglar yo'q!")
+            await message.answer(f"{EMOJI_LIST} Loglar yo'q!")
             return
         text = f"{EMOJI_LIST} LOGLAR:\n\n" + "\n".join(f"│ {l[:150]}" for l in logs[-30:])
-        self.bot.reply_to(m, truncate_text(text))
+        await message.answer(truncate_text(text))
 
-    def _delete_cmd(self, m):
-        msg = self.bot.reply_to(m, f"{EMOJI_TRASH} O'chirmoqchi bot ID sini yuboring:")
-        self.bot.register_next_step_handler(msg, self._delete_exec)
+    async def _delete_cmd(self, message: types.Message):
+        await message.answer(f"{EMOJI_TRASH} O'chirmoqchi bot ID sini yuboring:")
+        self.dp.message.register(self._delete_exec, lambda m: m.text and not m.text.startswith('/'))
 
-    def _delete_exec(self, m):
-        did = m.text.strip()
+    async def _delete_exec(self, message: types.Message):
+        did = message.text.strip()
         if not did:
-            self.bot.reply_to(m, f"{EMOJI_CROSS} ID bo'sh!")
+            await message.answer(f"{EMOJI_CROSS} ID bo'sh!")
             return
-        success, msg = self.engine.delete_bot(did, m.from_user.id)
-        self.bot.reply_to(m, f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
+        success, msg = await self.engine.delete_bot(did, message.from_user.id)
+        await message.answer(f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
 
-    def run(self):
-        try:
-            me = self.bot.get_me()
-            log.info(f"Bot ishga tushdi: @{me.username}")
-            print(f"{EMOJI_ROCKET} Bot ishga tushdi: @{me.username}")
-            self.bot.infinity_polling(timeout=60, long_polling_timeout=60)
-        except Exception as e:
-            log.error(f"Bot xatosi: {e}")
+    async def on_startup(self):
+        log.info("Bot ishga tushmoqda...")
+        # Server restartdan keyin avvalgi botlarni qayta ishga tushirish
+        log.info("Avvalgi botlarni qayta tiklash boshlanmoqda...")
+        restored, failed = self.pm.restore_all_bots(self.db)
+        if restored > 0:
+            log.info(f"{restored} ta bot qayta tiklandi")
+        if failed > 0:
+            log.warning(f"{failed} ta bot qayta tiklanmadi")
 
-    def shutdown(self):
+    async def on_shutdown(self):
         log.info("Bot to'xtatilmoqda...")
         self.pm.stop_all()
-        self.engine.fh.cleanup_all()
+        self.fh.cleanup_all()
         self.db.close()
+        await self.bot.session.close()
         log.info("Bot to'xtatildi")
 
-
-# ================================================================
-# SIGNAL HANDLER
-# ================================================================
-
-def signal_handler(signum, frame):
-    log.info(f"Signal qabul qilindi: {signum}")
-    if 'bot_instance' in globals():
-        bot_instance.shutdown()
-    sys.exit(0)
+    async def run(self):
+        await self.on_startup()
+        try:
+            me = await self.bot.get_me()
+            log.info(f"Bot ishga tushdi: @{me.username}")
+            print(f"{EMOJI_ROCKET} Bot ishga tushdi: @{me.username}")
+            await self.dp.start_polling(self.bot)
+        except Exception as e:
+            log.error(f"Bot xatosi: {e}")
+        finally:
+            await self.on_shutdown()
 
 
 # ================================================================
@@ -1854,24 +1926,24 @@ def print_banner():
     sys_info = get_system_info()
     banner = f"""
 {'=' * 55}
-{' ' * 15}{EMOJI_ROCKET} BOT DEPLOY BOT v4.6
+{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v5.0 (Aiogram)
 {'=' * 55}
 
-  Versiya:      4.6 (Auto-restore qo'shilgan)
-  Sana:         2026-03-31
+  Versiya:      5.0 (Aiogram bilan ishlaydi)
+  Sana:         2026-04-04
   Platform:     {sys_info['platform']} {sys_info['platform_release']}
   Python:       {sys_info['python_version']}
 
 {'=' * 55}
   XUSUSIYATLAR:
 {'=' * 55}
+  {EMOJI_CHECK} Aiogram va Telebot bilan ishlaydi
   {EMOJI_CHECK} Oddiy .py fayl qabul qiladi
   {EMOJI_CHECK} Kod tahlili va sifat bahosi
   {EMOJI_CHECK} Xavfli kodlarni bloklash
   {EMOJI_CHECK} Avtomatik qayta ishga tushirish
-  {EMOJI_CHECK} Bot shablonlari
+  {EMOJI_CHECK} Bot shablonlari (Aiogram + Telebot)
   {EMOJI_CHECK} Statistika va monitoring
-  {EMOJI_CHECK} Windows UTF-8 qo'llab-quvvatlanadi
   {EMOJI_CHECK} Server restartda avvalgi botlar avtomatik tiklanadi
 
 {'=' * 55}
@@ -1891,31 +1963,27 @@ def print_banner():
 # ASOSIY FUNKSIYA
 # ================================================================
 
-def main():
+async def main():
     print_banner()
 
-    global bot_instance
+    bot = DeployBot(BOT_TOKEN, OWNER_ID)
+    await bot.run()
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
 
-    try:
-        bot_instance = DeployBot(BOT_TOKEN, OWNER_ID)
-        bot_instance.run()
-    except KeyboardInterrupt:
-        print(f"\n{EMOJI_STOP} Bot to'xtatildi")
-        if 'bot_instance' in globals():
-            bot_instance.shutdown()
-    except Exception as e:
-        print(f"\n{EMOJI_CROSS} XATOLIK: {e}")
-        traceback.print_exc()
-        if 'bot_instance' in globals():
-            try:
-                bot_instance.shutdown()
-            except:
-                pass
-        sys.exit(1)
+def signal_handler(signum, frame):
+    log.info(f"Signal qabul qilindi: {signum}")
+    print(f"\n{EMOJI_STOP} Bot to'xtatilmoqda...")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print(f"\n{EMOJI_STOP} Bot to'xtatildi")
+    except Exception as e:
+        print(f"\n{EMOJI_CROSS} XATOLIK: {e}")
+        traceback.print_exc()
