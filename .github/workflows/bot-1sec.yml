@@ -1,0 +1,54 @@
+name: 1 Sekundda Ishlaydigan Bot
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # Har 5 daqiqada qayta ishga tushadi
+  workflow_dispatch:
+
+jobs:
+  one-second-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # 5.8 soat ishlaydi
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install
+      run: pip install -r requirements.txt
+    
+    - name: Run Bot (1 sekundda tekshiruv)
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        OWNER_ID: ${{ secrets.OWNER_ID }}
+      run: |
+        python -c "
+import time
+import requests
+from datetime import datetime
+
+BOT_TOKEN = '${{ secrets.BOT_TOKEN }}'
+count = 0
+
+print('⚡ BOT 1 SEKUNDDA ISHLAYDI ⚡')
+print('=' * 50)
+
+while True:
+    count += 1
+    try:
+        url = f'https://api.telegram.org/bot{BOT_TOKEN}/getMe'
+        r = requests.get(url, timeout=3)
+        if r.status_code == 200:
+            print(f'[{datetime.now().strftime(\"%H:%M:%S\")}] #{count} ✅ BOT ISHLAYAPTI')
+        else:
+            print(f'[{datetime.now().strftime(\"%H:%M:%S\")}] #{count} ❌ XATO')
+    except:
+        print(f'[{datetime.now().strftime(\"%H:%M:%S\")}] #{count} ❌ ULANA OLMADI')
+    
+    time.sleep(1)  # 1 sekund kutish
+"
