@@ -1,0 +1,19 @@
+# .github/workflows/keep-alive.yml
+name: Keep Bot Alive 24/7
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Check bot status
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      run: |
+        curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getMe" || true
+        echo "Bot is alive at $(date)"
