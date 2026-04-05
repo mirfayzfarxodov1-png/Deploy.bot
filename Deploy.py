@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 # ================================================================
 # BOT DEPLOY BOT - AIOGRAM VERSIYA (TO'LIQ TUZATILGAN)
-# Version: 5.1
-# Sana: 2026-04-04
+# Version: 5.2
+# Sana: 2026-04-06
 # ================================================================
-# TUZATILDI: AttributeError 'fh' xatosi to'g'irlandi
-# TUZATILDI: Conflict xatosi uchun webhook o'chirildi
+# TUZATILDI: DeployEngine va CodeAnalyzer ulanishi
+# TUZATILDI: FSM state nomlari
+# TUZATILDI: self.engine.ca -> self.engine.code_analyzer
 # ================================================================
 
 import asyncio
@@ -913,7 +914,7 @@ class DeployEngine:
         self.pm = pm
         self.tv = tv
         self.fh = FileHandler()
-        self.ca = CodeAnalyzer()
+        self.code_analyzer = CodeAnalyzer()  # ✅ code_analyzer deb nomlandi
         self.user_data = {}
 
     def generate_deploy_id(self):
@@ -933,7 +934,7 @@ class DeployEngine:
         bot_username = token_info.get('username', '') if token_info else ''
         bot_name = token_info.get('first_name', '') if token_info else ''
 
-        analysis = self.ca.analyze_code(file_path)
+        analysis = self.code_analyzer.analyze_code(file_path)  # ✅ code_analyzer
         if not analysis['valid']:
             return None, "Kodda xatoliklar bor", analysis
 
@@ -945,7 +946,7 @@ class DeployEngine:
             self.fh.cleanup(deploy_dir)
             return None, "Faylni saqlashda xatolik", analysis
 
-        self.ca.inject_token(saved_file, bot_token)
+        self.code_analyzer.inject_token(saved_file, bot_token)  # ✅ code_analyzer
 
         req_installed = False
         if analysis['has_requirements'] and analysis['requirements']:
@@ -1228,7 +1229,7 @@ class DeployBot:
         self.tv = TokenValidator()
         self.engine = DeployEngine(self.db, self.pm, self.tv)
         self.templates = TemplateManager()
-        self.fh = FileHandler()  # ✅ QO'SHILDI - 'fh' xatosi uchun
+        self.fh = FileHandler()
         self.start_time = datetime.now()
         self._setup_handlers()
         self._init_dirs()
@@ -1352,7 +1353,6 @@ class DeployBot:
         self.db.register_user(uid, message.from_user.username, message.from_user.first_name)
         await state.clear()
 
-        # Webhookni o'chirish (Conflict xatosi uchun)
         try:
             await self.bot.delete_webhook(drop_pending_updates=True)
         except:
@@ -1674,15 +1674,15 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
             shutil.rmtree(temp_dir, ignore_errors=True)
             return
 
-        # ✅ TO'G'RI - self.fh ishlatiladi
         valid, msg = self.fh.validate_file(file_path)
         if not valid:
             await message.answer(f"{EMOJI_CROSS} {msg}")
             shutil.rmtree(temp_dir, ignore_errors=True)
             return
 
-        analysis = self.engine.ca.analyze_code(file_path)
-        analysis_text = self.engine.ca.get_analysis_text(analysis)
+        # ✅ TO'G'RI - engine.code_analyzer
+        analysis = self.engine.code_analyzer.analyze_code(file_path)
+        analysis_text = self.engine.code_analyzer.get_analysis_text(analysis)
 
         if not analysis['valid']:
             await message.answer(f"{EMOJI_CROSS} Kodda xatoliklar bor:\n\n{analysis_text}")
@@ -1888,14 +1888,12 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
 
     async def on_startup(self):
         log.info("Bot ishga tushmoqda...")
-        # Webhookni o'chirish (Conflict xatosi uchun)
         try:
             await self.bot.delete_webhook(drop_pending_updates=True)
             log.info("Webhook o'chirildi")
         except Exception as e:
             log.warning(f"Webhook o'chirish xatosi: {e}")
         
-        # Avvalgi botlarni qayta tiklash
         log.info("Avvalgi botlarni qayta tiklash boshlanmoqda...")
         restored, failed = self.pm.restore_all_bots(self.db)
         if restored > 0:
@@ -1932,11 +1930,11 @@ def print_banner():
     sys_info = get_system_info()
     banner = f"""
 {'=' * 55}
-{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v5.1 (Aiogram)
+{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v5.2 (Aiogram)
 {'=' * 55}
 
-  Versiya:      5.1 (To'liq tuzatilgan)
-  Sana:         2026-04-04
+  Versiya:      5.2 (To'liq tuzatilgan)
+  Sana:         2026-04-06
   Platform:     {sys_info['platform']} {sys_info['platform_release']}
   Python:       {sys_info['python_version']}
 
