@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 # ================================================================
 # BOT DEPLOY BOT - AIOGRAM VERSIYA (TO'LIQ TUZATILGAN)
-# Version: 5.2
+# Version: 5.3
 # Sana: 2026-04-06
 # ================================================================
-# TUZATILDI: DeployEngine va CodeAnalyzer ulanishi
-# TUZATILDI: FSM state nomlari
-# TUZATILDI: self.engine.ca -> self.engine.code_analyzer
+# TUZATILDI: Fayl yuborish muammosi to'g'irlandi
+# TUZATILDI: FSM state to'g'ri ishlaydi
 # ================================================================
 
 import asyncio
@@ -914,7 +913,7 @@ class DeployEngine:
         self.pm = pm
         self.tv = tv
         self.fh = FileHandler()
-        self.code_analyzer = CodeAnalyzer()  # ✅ code_analyzer deb nomlandi
+        self.code_analyzer = CodeAnalyzer()
         self.user_data = {}
 
     def generate_deploy_id(self):
@@ -934,7 +933,7 @@ class DeployEngine:
         bot_username = token_info.get('username', '') if token_info else ''
         bot_name = token_info.get('first_name', '') if token_info else ''
 
-        analysis = self.code_analyzer.analyze_code(file_path)  # ✅ code_analyzer
+        analysis = self.code_analyzer.analyze_code(file_path)
         if not analysis['valid']:
             return None, "Kodda xatoliklar bor", analysis
 
@@ -946,7 +945,7 @@ class DeployEngine:
             self.fh.cleanup(deploy_dir)
             return None, "Faylni saqlashda xatolik", analysis
 
-        self.code_analyzer.inject_token(saved_file, bot_token)  # ✅ code_analyzer
+        self.code_analyzer.inject_token(saved_file, bot_token)
 
         req_installed = False
         if analysis['has_requirements'] and analysis['requirements']:
@@ -1308,7 +1307,8 @@ class DeployBot:
         async def file_handler(message: types.Message, state: FSMContext):
             await self._handle_file(message, state)
 
-        @dp.message(lambda m: m.text and m.text.startswith(EMOJI_FILE))
+        # ✅ TO'G'RILANGAN: Matn handlerlari
+        @dp.message(lambda m: m.text == f"{EMOJI_FILE} Fayl yuborin")
         async def upload_request(message: types.Message, state: FSMContext):
             await self._send_upload_request(message, state)
 
@@ -1346,7 +1346,8 @@ class DeployBot:
             if current_state == DeployStates.waiting_for_token.state:
                 await self._receive_token(message, state)
             else:
-                await message.answer(f"{EMOJI_QUESTION} Noma'lum buyruq. Yordam uchun /help")
+                # Bot hech qanday javob qaytarmaydi - jim turadi
+                pass
 
     async def _start(self, message: types.Message, state: FSMContext):
         uid = message.from_user.id
@@ -1616,6 +1617,7 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
 
         await callback.answer()
 
+    # ✅ TO'G'RILANGAN: Fayl yuborish so'rovi
     async def _send_upload_request(self, message: types.Message, state: FSMContext):
         await state.set_state(DeployStates.waiting_for_file)
 
@@ -1634,6 +1636,7 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
         markup = self._rkb([[f"{EMOJI_CROSS} Bekor qilish"]])
         await message.answer(text, reply_markup=markup)
 
+    # ✅ TO'G'RILANGAN: Faylni qabul qilish
     async def _handle_file(self, message: types.Message, state: FSMContext):
         uid = message.from_user.id
 
@@ -1680,7 +1683,6 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
             shutil.rmtree(temp_dir, ignore_errors=True)
             return
 
-        # ✅ TO'G'RI - engine.code_analyzer
         analysis = self.engine.code_analyzer.analyze_code(file_path)
         analysis_text = self.engine.code_analyzer.get_analysis_text(analysis)
 
@@ -1930,10 +1932,10 @@ def print_banner():
     sys_info = get_system_info()
     banner = f"""
 {'=' * 55}
-{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v5.2 (Aiogram)
+{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v5.3 (Aiogram)
 {'=' * 55}
 
-  Versiya:      5.2 (To'liq tuzatilgan)
+  Versiya:      5.3 (To'liq tuzatilgan)
   Sana:         2026-04-06
   Platform:     {sys_info['platform']} {sys_info['platform_release']}
   Python:       {sys_info['python_version']}
