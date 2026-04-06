@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 # ================================================================
 # BOT DEPLOY BOT - AIOGRAM VERSIYA (TO'LIQ TUZATILGAN)
-# Version: 5.3
+# Version: 6.0
 # Sana: 2026-04-06
 # ================================================================
-# TUZATILDI: Fayl yuborish muammosi to'g'irlandi
-# TUZATILDI: FSM state to'g'ri ishlaydi
+# TUZATILDI: Server restartda deploy qilingan botlar avtomatik tiklanadi
+# TUZATILDI: Baza saqlanadi va qayta tiklanadi
 # ================================================================
 
 import asyncio
@@ -120,6 +120,7 @@ EMOJI_PLAY = "▶️"
 EMOJI_INFO = "ℹ️"
 EMOJI_LOCK = "⛔"
 EMOJI_MESSAGE = "💬"
+EMOJI_SAVE = "💾"
 
 YES_TEXT = "✅ Bor"
 NO_TEXT = "❌ Yo'q"
@@ -189,7 +190,7 @@ def truncate_text(text, max_length=4096):
 
 
 # ================================================================
-# MA'LUMOTLAR BAZASI
+# MA'LUMOTLAR BAZASI (TO'LIQ SAQLANADI)
 # ================================================================
 
 class Database:
@@ -199,16 +200,30 @@ class Database:
         self._lock = threading.Lock()
         self._connect()
         self._create_tables()
+        self._migrate_database()
 
     def _connect(self):
         try:
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=15)
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA foreign_keys=ON")
             log.info(f"Bazaga ulandi: {self.db_path}")
         except Exception as e:
             log.error(f"Bazaga ulanishda xatolik: {e}")
             raise
+
+    def _migrate_database(self):
+        """Eski bazani yangilash (agar kerak bo'lsa)"""
+        try:
+            # deployments jadvalida updated_at maydoni borligini tekshirish
+            cursor = self.conn.execute("PRAGMA table_info(deployments)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'updated_at' not in columns:
+                self.conn.execute("ALTER TABLE deployments ADD COLUMN updated_at TEXT")
+                log.info("Database migrated: added updated_at column")
+        except Exception as e:
+            log.warning(f"Migration xatosi: {e}")
 
     def _create_tables(self):
         tables_sql = """
@@ -295,7 +310,17 @@ class Database:
                 self.conn.commit()
                 return cursor
             except Exception as e:
-                log.error(f"DB xatosi: {e}")
+                log.error(f"DB xatosi: {e}\nSQL: {query[:200]}")
+                return None
+
+    def executemany(self, query, params_list):
+        with self._lock:
+            try:
+                cursor = self.conn.executemany(query, params_list)
+                self.conn.commit()
+                return cursor
+            except Exception as e:
+                log.error(f"DB executemany xatosi: {e}")
                 return None
 
     def fetchone(self, query, params=()):
@@ -354,8 +379,13 @@ class Database:
                              (user_id, limit))
 
     def get_all_deploys(self):
+        """Barcha deploylarni olish (server restartda ishlatiladi)"""
         return self.fetchall('SELECT * FROM deployments WHERE status IN (?, ?)',
                              (BOT_STATUS_RUNNING, BOT_STATUS_STARTING))
+
+    def get_all_deploys_for_restore(self):
+        """Qayta tiklash uchun barcha deploylarni olish"""
+        return self.fetchall('SELECT * FROM deployments')
 
     def update_deploy_status(self, deploy_id, status, **kwargs):
         now = str(datetime.now())
@@ -369,6 +399,13 @@ class Database:
         self.execute(f"UPDATE deployments SET {', '.join(sets)} WHERE deploy_id=?", params)
 
     def delete_deploy(self, deploy_id):
+        # Avval deploy papkasini o'chirish (agar mavjud bo'lsa)
+        deploy = self.get_deploy(deploy_id)
+        if deploy and deploy['code_dir'] and os.path.exists(deploy['code_dir']):
+            try:
+                shutil.rmtree(deploy['code_dir'], ignore_errors=True)
+            except Exception as e:
+                log.warning(f"Deploy papkasini o'chirish xatosi: {e}")
         self.execute('DELETE FROM deployments WHERE deploy_id=?', (deploy_id,))
         self.execute('DELETE FROM bot_logs WHERE deploy_id=?', (deploy_id,))
 
@@ -388,10 +425,26 @@ class Database:
             'today': dict(today_stats) if today_stats else {}
         }
 
+    def backup_database(self, backup_path=None):
+        """Bazani backup qilish"""
+        if not backup_path:
+            backup_path = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        try:
+            with self._lock:
+                backup = sqlite3.connect(backup_path)
+                self.conn.backup(backup)
+                backup.close()
+            log.info(f"Baza backup qilindi: {backup_path}")
+            return backup_path
+        except Exception as e:
+            log.error(f"Backup xatosi: {e}")
+            return None
+
     def close(self):
         try:
             if self.conn:
                 self.conn.close()
+                log.info("Baza yopildi")
         except:
             pass
 
@@ -643,7 +696,7 @@ class CodeAnalyzer:
 
 
 # ================================================================
-# PROSESS MANAGER
+# PROSESS MANAGER (TO'LIQ QAYTA TIKLANADI)
 # ================================================================
 
 class ProcessManager:
@@ -660,8 +713,9 @@ class ProcessManager:
                     for deploy_id, info in list(self.processes.items()):
                         proc = info.get('process')
                         if proc and proc.poll() is not None:
-                            log.warning(f"Bot {deploy_id} to'xtadi (exit: {proc.returncode})")
-                            if AUTO_RESTART and proc.returncode != 0:
+                            exit_code = proc.returncode
+                            log.warning(f"Bot {deploy_id} to'xtadi (exit: {exit_code})")
+                            if AUTO_RESTART and exit_code != 0:
                                 rc = info.get('restart_count', 0)
                                 if rc < MAX_RESTART_ATTEMPTS:
                                     log.info(f"Bot {deploy_id} qayta ishga tushirilmoqda...")
@@ -816,8 +870,9 @@ class ProcessManager:
         return self.processes.get(deploy_id)
 
     def restore_all_bots(self, db):
-        deploys = db.get_all_deploys()
-        log.info(f"Restoring {len(deploys)} bots from database...")
+        """Server restartdan keyin barcha botlarni qayta ishga tushirish"""
+        deploys = db.get_all_deploys_for_restore()
+        log.info(f"Qayta tiklanadigan botlar: {len(deploys)} ta")
         
         restored = 0
         failed = 0
@@ -828,24 +883,43 @@ class ProcessManager:
             main_file = os.path.join(work_dir, deploy['main_file'])
             token = deploy['bot_token']
             
-            if not os.path.exists(work_dir) or not os.path.exists(main_file):
-                log.warning(f"Bot {deploy_id} fayllari topilmadi")
-                db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message="Fayllar topilmadi")
+            # Fayllar mavjudligini tekshirish
+            if not work_dir or not os.path.exists(work_dir):
+                log.warning(f"Bot {deploy_id} papkasi topilmadi: {work_dir}")
+                db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message="Papka topilmadi")
                 failed += 1
                 continue
             
+            if not os.path.exists(main_file):
+                log.warning(f"Bot {deploy_id} asosiy fayli topilmadi: {main_file}")
+                db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message="Asosiy fayl topilmadi")
+                failed += 1
+                continue
+            
+            # Token mavjudligini tekshirish
+            if not token:
+                log.warning(f"Bot {deploy_id} tokeni topilmadi")
+                db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message="Token topilmadi")
+                failed += 1
+                continue
+            
+            log.info(f"Bot qayta tiklanmoqda: {deploy_id} - {deploy['bot_username']}")
             success, msg = self.start_process(deploy_id, work_dir, main_file, token)
+            
             if success:
                 restored += 1
-                log.info(f"Bot {deploy_id} qayta tiklandi")
+                log.info(f"✅ Bot {deploy_id} qayta tiklandi")
+                db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, 
+                                       started_at=str(datetime.now()),
+                                       error_message=None)
             else:
                 failed += 1
-                log.error(f"Bot {deploy_id} qayta tiklanmadi: {msg}")
+                log.error(f"❌ Bot {deploy_id} qayta tiklanmadi: {msg}")
                 db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message=msg)
             
-            time.sleep(0.5)
+            time.sleep(0.5)  # Rate limiting
         
-        log.info(f"Restore complete: {restored} restored, {failed} failed")
+        log.info(f"Qayta tiklash yakunlandi: {restored} restored, {failed} failed")
         return restored, failed
 
     def stop_all(self):
@@ -992,7 +1066,8 @@ class DeployEngine:
             return False, "Bot topilmadi yoki sizga tegishli emas"
         success, msg = self.pm.stop(deploy_id)
         if success:
-            self.db.update_deploy_status(deploy_id, BOT_STATUS_STOPPED, stopped_at=str(datetime.now()))
+            now = str(datetime.now())
+            self.db.update_deploy_status(deploy_id, BOT_STATUS_STOPPED, stopped_at=now)
         return success, msg
 
     async def restart_bot(self, deploy_id, user_id):
@@ -1299,6 +1374,22 @@ class DeployBot:
         async def cancel_cmd(message: types.Message, state: FSMContext):
             await self._cancel(message, state)
 
+        @dp.message(Command("backup"))
+        async def backup_cmd(message: types.Message):
+            if message.from_user.id != self.owner_id:
+                await message.answer(f"{EMOJI_LOCK} Faqat owner uchun!")
+                return
+            backup_path = self.db.backup_database()
+            if backup_path and os.path.exists(backup_path):
+                await self.bot.send_document(
+                    message.chat.id,
+                    types.FSInputFile(backup_path, filename=os.path.basename(backup_path)),
+                    caption=f"{EMOJI_SAVE} Baza backup qilindi!"
+                )
+                os.remove(backup_path)
+            else:
+                await message.answer(f"{EMOJI_CROSS} Backup qilib bo'lmadi!")
+
         @dp.callback_query()
         async def callback_handler(callback: types.CallbackQuery, state: FSMContext):
             await self._callback(callback, state)
@@ -1307,7 +1398,6 @@ class DeployBot:
         async def file_handler(message: types.Message, state: FSMContext):
             await self._handle_file(message, state)
 
-        # ✅ TO'G'RILANGAN: Matn handlerlari
         @dp.message(lambda m: m.text == f"{EMOJI_FILE} Fayl yuborin")
         async def upload_request(message: types.Message, state: FSMContext):
             await self._send_upload_request(message, state)
@@ -1346,8 +1436,7 @@ class DeployBot:
             if current_state == DeployStates.waiting_for_token.state:
                 await self._receive_token(message, state)
             else:
-                # Bot hech qanday javob qaytarmaydi - jim turadi
-                pass
+                pass  # Jim turadi
 
     async def _start(self, message: types.Message, state: FSMContext):
         uid = message.from_user.id
@@ -1427,6 +1516,7 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
   /delete - Botni o'chirish
   /stats - Statistika
   /templates - Shablonlar
+  /backup - Bazani backup qilish
   /cancel - Bekor qilish
 """
         await message.answer(text)
@@ -1617,7 +1707,6 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
 
         await callback.answer()
 
-    # ✅ TO'G'RILANGAN: Fayl yuborish so'rovi
     async def _send_upload_request(self, message: types.Message, state: FSMContext):
         await state.set_state(DeployStates.waiting_for_file)
 
@@ -1636,7 +1725,6 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
         markup = self._rkb([[f"{EMOJI_CROSS} Bekor qilish"]])
         await message.answer(text, reply_markup=markup)
 
-    # ✅ TO'G'RILANGAN: Faylni qabul qilish
     async def _handle_file(self, message: types.Message, state: FSMContext):
         uid = message.from_user.id
 
@@ -1896,12 +1984,13 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
         except Exception as e:
             log.warning(f"Webhook o'chirish xatosi: {e}")
         
+        # Avvalgi botlarni qayta tiklash (BAZA SAQLANADI)
         log.info("Avvalgi botlarni qayta tiklash boshlanmoqda...")
         restored, failed = self.pm.restore_all_bots(self.db)
         if restored > 0:
-            log.info(f"{restored} ta bot qayta tiklandi")
+            log.info(f"✅ {restored} ta bot qayta tiklandi")
         if failed > 0:
-            log.warning(f"{failed} ta bot qayta tiklanmadi")
+            log.warning(f"❌ {failed} ta bot qayta tiklanmadi")
 
     async def on_shutdown(self):
         log.info("Bot to'xtatilmoqda...")
@@ -1932,10 +2021,10 @@ def print_banner():
     sys_info = get_system_info()
     banner = f"""
 {'=' * 55}
-{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v5.3 (Aiogram)
+{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v6.0 (Aiogram)
 {'=' * 55}
 
-  Versiya:      5.3 (To'liq tuzatilgan)
+  Versiya:      6.0 (Baza saqlanadi va qayta tiklanadi)
   Sana:         2026-04-06
   Platform:     {sys_info['platform']} {sys_info['platform_release']}
   Python:       {sys_info['python_version']}
@@ -1950,8 +2039,10 @@ def print_banner():
   {EMOJI_CHECK} Avtomatik qayta ishga tushirish
   {EMOJI_CHECK} Bot shablonlari (Aiogram + Telebot)
   {EMOJI_CHECK} Statistika va monitoring
-  {EMOJI_CHECK} Server restartda avvalgi botlar avtomatik tiklanadi
-  {EMOJI_CHECK} Webhook avtomatik o'chiriladi (Conflict xatosi yo'q)
+  {EMOJI_CHECK} Server restartda avvalgi botlar avtomatik tiklanadi ✅
+  {EMOJI_CHECK} Baza ma'lumotlari saqlanadi va qayta tiklanadi ✅
+  {EMOJI_CHECK} Webhook avtomatik o'chiriladi
+  {EMOJI_SAVE} Backup qilish (/backup)
 
 {'=' * 55}
   SOZLAMALAR:
