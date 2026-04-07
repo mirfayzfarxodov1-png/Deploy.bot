@@ -1,1948 +1,2252 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # ================================================================
-# BOT DEPLOY BOT - TO'LIQ TUZATILGAN
-# Version: 7.1
-# Sana: 2026-04-07
+# ANICITY RASMIY BOT - TO'LIQ VERSIYA
+# ================================================================
+# Muallif: @s_2akk
+# Kanal: @AniCity_Rasmiy
 # ================================================================
 
 import asyncio
-import os
-import sys
-import re
-import json
-import shutil
-import time
-import random
-import subprocess
-import threading
-import tempfile
-import traceback
-import hashlib
-import sqlite3
 import logging
-import signal
-import socket
-import platform
-from datetime import datetime, date, timedelta
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+import sqlite3
+import os
+import re
+import io
+from datetime import datetime
+from typing import Tuple, List, Dict, Any, Callable, Awaitable
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-
-# ================================================================
-# KONFIGURATSIYA
-# ================================================================
-
-BOT_TOKEN = "8620689920:AAFq5br1REfWg499X51Lezq8_PXznbvo9rI"
-OWNER_ID = 5675087151
-
-DEPLOY_DIR = "deployed_bots"
-LOGS_DIR = "bot_logs"
-TEMPLATES_DIR = "templates"
-MAX_FILE_SIZE = 5 * 1024 * 1024
-MIN_FILE_SIZE = 50
-PROCESS_CHECK_INTERVAL = 30
-AUTO_RESTART = True
-AUTO_RESTART_DELAY = 10
-MAX_RESTART_ATTEMPTS = 5
-PYTHON_CMD = sys.executable
-MAX_LOG_LINES = 1000
-
-ALLOWED_EXTENSIONS = {'.py'}
-BLOCKED_PATTERNS = [
-    r'os\.system\s*\(\s*[\'"]rm\s+-rf',
-    r'os\.system\s*\(\s*[\'"]rm\s+-r\s+/',
-    r'os\.remove\s*\([\'"]/',
-    r'shutil\.rmtree\s*\([\'"]/',
-    r'eval\s*\(\s*input',
-    r'__import__\s*\(\s*[\'"]os[\'"]\s*\)\.system',
-]
-
-LOG_FORMAT = '%(asctime)s | %(levelname)-8s | %(message)s'
-logging.basicConfig(
-    level=logging.INFO,
-    format=LOG_FORMAT,
-    handlers=[
-        logging.FileHandler('deploy_bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, TelegramObject, FSInputFile, BufferedInputFile
 )
-log = logging.getLogger('DeployBot')
-
-BOT_STATUS_RUNNING = "running"
-BOT_STATUS_STOPPED = "stopped"
-BOT_STATUS_FAILED = "failed"
-BOT_STATUS_STARTING = "starting"
-
-# FSM States
-class DeployStates(StatesGroup):
-    waiting_for_file = State()
-    waiting_for_token = State()
-
-# Emojilar
-EMOJI_ROCKET = "🚀"
-EMOJI_CHECK = "✅"
-EMOJI_CROSS = "❌"
-EMOJI_WARNING = "⚠️"
-EMOJI_FILE = "📁"
-EMOJI_KEY = "🔑"
-EMOJI_BOT = "🤖"
-EMOJI_GREEN = "🟢"
-EMOJI_RED = "🔴"
-EMOJI_WHITE = "⚪"
-EMOJI_CLOCK = "⏱"
-EMOJI_CHART = "📊"
-EMOJI_LIST = "📋"
-EMOJI_RESTART = "🔄"
-EMOJI_STOP = "🛑"
-EMOJI_TRASH = "🗑"
-EMOJI_BACK = "🔙"
-EMOJI_STAR = "⭐"
-EMOJI_QUESTION = "❓"
-EMOJI_PEN = "📝"
-EMOJI_HOURGLASS = "⏳"
-EMOJI_BOX = "📦"
-EMOJI_PAGE = "📄"
-EMOJI_SIZE = "💾"
-EMOJI_TOOL = "🔧"
-EMOJI_ARROW = "➡️"
-EMOJI_PLAY = "▶️"
-EMOJI_INFO = "ℹ️"
-EMOJI_LOCK = "⛔"
-EMOJI_MESSAGE = "💬"
-EMOJI_SAVE = "💾"
-
-YES_TEXT = "✅ Bor"
-NO_TEXT = "❌ Yo'q"
-UNKNOWN_TEXT = "Noma'lum"
-NA_TEXT = "N/A"
-
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ================================================================
-# YORDAMCHI FUNKSIYALAR
+# 1-KONFIGURATSIYA
 # ================================================================
+BOT_TOKEN = "8545654766:AAHc9XBWMsgQWxibBXcPN44vu1rZ6AILlMg"
+ADMINS = [5675087151, 6498527560]
+MAIN_CHANNEL = "@AniCity_Rasmiy"
+AUTHOR_USERNAME = "@s_2akk"
+AUTHOR_LINK = "https://t.me/S_2ak"
+SUPPORT_USERNAME = "@s_2akk"
+SUPPORT_LINK = "https://t.me/S_2ak"
+BASE_CHANNEL_ID = -1003888128587
 
-def format_uptime(seconds):
-    if seconds is None or seconds < 0:
-        return NA_TEXT
-    days = int(seconds // 86400)
-    hours = int((seconds % 86400) // 3600)
-    minutes = int((seconds % 3600) // 60)
-    parts = []
-    if days > 0:
-        parts.append(f"{days}kun")
-    if hours > 0:
-        parts.append(f"{hours}soat")
-    if minutes > 0:
-        parts.append(f"{minutes}daq")
-    return " ".join(parts) if parts else "0daq"
-
-
-def format_size(size_bytes):
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    else:
-        return f"{size_bytes / (1024 * 1024):.2f} MB"
-
-
-def safe_filename(filename):
-    if not filename:
-        return "bot.py"
-    safe = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    safe = safe.strip('. ')
-    if not safe.endswith('.py'):
-        safe += '.py'
-    return safe or "bot.py"
-
-
-def generate_id(prefix="dep", length=10):
-    raw = str(time.time()) + str(random.random()) + str(os.getpid())
-    hashed = hashlib.md5(raw.encode()).hexdigest()
-    return f"{prefix}_{hashed[:length]}"
-
-
-def get_system_info():
-    return {
-        'platform': platform.system(),
-        'platform_release': platform.release(),
-        'python_version': platform.python_version(),
-        'architecture': platform.machine(),
-        'hostname': socket.gethostname(),
-    }
-
-
-def truncate_text(text, max_length=4096):
-    if len(text) <= max_length:
-        return text
-    return text[:max_length - 20] + "\n\n... [davomi kesilgan]"
-
+# LOCAL RASMLAR (agar mavjud bo'lsa)
+START_IMAGE_PATH = "Anime.jpg"
+ADMIN_IMAGE_PATH = "admin.png"
 
 # ================================================================
-# MA'LUMOTLAR BAZASI
+# 2-DATABASE
 # ================================================================
+DB_NAME = 'anime_bot.db'
 
-class Database:
-    def __init__(self, db_path='deploy_bots.db'):
-        self.db_path = db_path
-        self.conn = None
-        self._lock = threading.Lock()
-        self._connect()
-        self._create_tables()
-        self._migrate_database()
+conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+cursor = conn.cursor()
 
-    def _connect(self):
-        try:
-            self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=15)
-            self.conn.row_factory = sqlite3.Row
-            self.conn.execute("PRAGMA journal_mode=WAL")
-            self.conn.execute("PRAGMA foreign_keys=ON")
-            log.info(f"Bazaga ulandi: {self.db_path}")
-        except Exception as e:
-            log.error(f"Bazaga ulanishda xatolik: {e}")
-            raise
+# Media jadvali
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS media (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code INTEGER UNIQUE,
+    type TEXT,
+    name TEXT UNIQUE,
+    description TEXT,
+    image_url TEXT,
+    genre TEXT,
+    status TEXT DEFAULT "ongoing",
+    season INTEGER DEFAULT 1,
+    total_parts INTEGER DEFAULT 0,
+    views INTEGER DEFAULT 0,
+    voice TEXT DEFAULT "",
+    sponsor TEXT DEFAULT "",
+    quality TEXT DEFAULT "720p",
+    created_at TEXT
+)
+''')
 
-    def _migrate_database(self):
-        try:
-            cursor = self.conn.execute("PRAGMA table_info(deployments)")
-            columns = [col[1] for col in cursor.fetchall()]
-            if 'updated_at' not in columns:
-                self.conn.execute("ALTER TABLE deployments ADD COLUMN updated_at TEXT")
-                log.info("Database migrated: added updated_at column")
-        except Exception as e:
-            log.warning(f"Migration xatosi: {e}")
+# Qismlar jadvali
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS parts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id INTEGER,
+    part_number INTEGER,
+    file_id TEXT,
+    caption TEXT,
+    created_at TEXT,
+    FOREIGN KEY (media_id) REFERENCES media (id) ON DELETE CASCADE
+)
+''')
 
-    def _create_tables(self):
-        tables_sql = """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER UNIQUE NOT NULL,
-            username TEXT DEFAULT '',
-            first_name TEXT DEFAULT '',
-            bot_count INTEGER DEFAULT 0,
-            total_deploys INTEGER DEFAULT 0,
-            successful_deploys INTEGER DEFAULT 0,
-            failed_deploys INTEGER DEFAULT 0,
-            registered_at TEXT NOT NULL,
-            last_active TEXT,
-            is_banned INTEGER DEFAULT 0
-        );
+# Foydalanuvchilar jadvali
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    last_name TEXT,
+    is_blocked INTEGER DEFAULT 0,
+    registered_at TEXT,
+    last_active TEXT
+)
+''')
 
-        CREATE TABLE IF NOT EXISTS deployments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            deploy_id TEXT UNIQUE NOT NULL,
-            user_id INTEGER NOT NULL,
-            bot_token TEXT NOT NULL,
-            bot_username TEXT DEFAULT '',
-            bot_name TEXT DEFAULT '',
-            main_file TEXT NOT NULL,
-            original_filename TEXT DEFAULT '',
-            file_hash TEXT DEFAULT '',
-            file_size INTEGER DEFAULT 0,
-            code_dir TEXT DEFAULT '',
-            framework TEXT DEFAULT '',
-            has_requirements INTEGER DEFAULT 0,
-            requirements_installed INTEGER DEFAULT 0,
-            requirements_list TEXT DEFAULT '',
-            status TEXT DEFAULT 'created',
-            pid INTEGER DEFAULT NULL,
-            started_at TEXT,
-            stopped_at TEXT,
-            last_restart TEXT,
-            restart_count INTEGER DEFAULT 0,
-            error_message TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT
-        );
+# Adminlar jadvali
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS admins (
+    user_id INTEGER PRIMARY KEY,
+    added_by INTEGER,
+    added_at TEXT
+)
+''')
 
-        CREATE TABLE IF NOT EXISTS bot_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            deploy_id TEXT NOT NULL,
-            message TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
+# Majburiy kanallar jadvali
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS forced_channels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_username TEXT UNIQUE,
+    is_active INTEGER DEFAULT 1
+)
+''')
 
-        CREATE TABLE IF NOT EXISTS daily_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT UNIQUE NOT NULL,
-            total_deploys INTEGER DEFAULT 0,
-            successful INTEGER DEFAULT 0,
-            failed INTEGER DEFAULT 0,
-            new_users INTEGER DEFAULT 0,
-            total_restarts INTEGER DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS user_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            username TEXT DEFAULT '',
-            message_text TEXT NOT NULL,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            replied_at TEXT
-        );
-        """
-        with self._lock:
-            try:
-                self.conn.executescript(tables_sql)
-                log.info("Jadvallar tayyor")
-            except Exception as e:
-                log.error(f"Jadvallar yaratishda xatolik: {e}")
-                raise
-
-    def execute(self, query, params=()):
-        with self._lock:
-            try:
-                cursor = self.conn.execute(query, params)
-                self.conn.commit()
-                return cursor
-            except Exception as e:
-                log.error(f"DB xatosi: {e}")
-                return None
-
-    def fetchone(self, query, params=()):
-        with self._lock:
-            try:
-                return self.conn.execute(query, params).fetchone()
-            except Exception as e:
-                log.error(f"DB fetchone xatosi: {e}")
-                return None
-
-    def fetchall(self, query, params=()):
-        with self._lock:
-            try:
-                return self.conn.execute(query, params).fetchall()
-            except Exception as e:
-                log.error(f"DB fetchall xatosi: {e}")
-                return []
-
-    def count(self, table, condition="1=1", params=()):
-        row = self.fetchone(f"SELECT COUNT(*) FROM {table} WHERE {condition}", params)
-        return row[0] if row else 0
-
-    def get_user(self, user_id):
-        return self.fetchone('SELECT * FROM users WHERE user_id=?', (user_id,))
-
-    def is_user_banned(self, user_id):
-        user = self.get_user(user_id)
-        return bool(user and user['is_banned'])
-
-    def register_user(self, user_id, username, first_name):
-        existing = self.get_user(user_id)
-        now = str(datetime.now())
-        if existing:
-            self.execute('UPDATE users SET username=?, first_name=?, last_active=? WHERE user_id=?',
-                        (username or '', first_name or '', now, user_id))
-            return existing
-        self.execute('''INSERT INTO users (user_id, username, first_name, registered_at, last_active)
-                        VALUES (?, ?, ?, ?, ?)''',
-                     (user_id, username or '', first_name or '', now, now))
-        today = str(date.today())
-        stat = self.fetchone('SELECT id FROM daily_stats WHERE date=?', (today,))
-        if stat:
-            self.execute('UPDATE daily_stats SET new_users=new_users+1 WHERE date=?', (today,))
-        else:
-            self.execute('INSERT INTO daily_stats(date, new_users) VALUES (?, 1)', (today,))
-        return self.get_user(user_id)
-
-    def update_user_activity(self, user_id):
-        self.execute('UPDATE users SET last_active=? WHERE user_id=?', (str(datetime.now()), user_id))
-
-    def get_deploy(self, deploy_id):
-        return self.fetchone('SELECT * FROM deployments WHERE deploy_id=?', (deploy_id,))
-
-    def get_user_deploys(self, user_id, limit=50):
-        return self.fetchall('SELECT * FROM deployments WHERE user_id=? ORDER BY created_at DESC LIMIT ?',
-                             (user_id, limit))
-
-    def get_all_deploys(self):
-        """Barcha deploylarni olish (server restartda ishlatiladi)"""
-        return self.fetchall('SELECT * FROM deployments')
-
-    def get_running_deploys(self):
-        """Ishlayotgan deploylarni olish"""
-        return self.fetchall('SELECT * FROM deployments WHERE status IN (?, ?)',
-                             (BOT_STATUS_RUNNING, BOT_STATUS_STARTING))
-
-    def update_deploy_status(self, deploy_id, status, **kwargs):
-        now = str(datetime.now())
-        sets = ['status=?', 'updated_at=?']
-        params = [status, now]
-        for key, value in kwargs.items():
-            if key in ('pid', 'error_message', 'restart_count', 'last_restart', 'started_at', 'stopped_at'):
-                sets.append(f'{key}=?')
-                params.append(value)
-        params.append(deploy_id)
-        self.execute(f"UPDATE deployments SET {', '.join(sets)} WHERE deploy_id=?", params)
-
-    def delete_deploy(self, deploy_id):
-        deploy = self.get_deploy(deploy_id)
-        if deploy and deploy['code_dir'] and os.path.exists(deploy['code_dir']):
-            try:
-                shutil.rmtree(deploy['code_dir'], ignore_errors=True)
-            except Exception as e:
-                log.warning(f"Deploy papkasini o'chirish xatosi: {e}")
-        self.execute('DELETE FROM deployments WHERE deploy_id=?', (deploy_id,))
-        self.execute('DELETE FROM bot_logs WHERE deploy_id=?', (deploy_id,))
-
-    def get_stats_summary(self):
-        total = self.count('deployments')
-        running = self.count('deployments', 'status=?', (BOT_STATUS_RUNNING,))
-        failed = self.count('deployments', 'status=?', (BOT_STATUS_FAILED,))
-        users = self.count('users')
-        today = str(date.today())
-        today_stats = self.fetchone('SELECT * FROM daily_stats WHERE date=?', (today,))
-        return {
-            'total': total,
-            'running': running,
-            'stopped': total - running - failed,
-            'failed': failed,
-            'users': users,
-            'today': dict(today_stats) if today_stats else {}
-        }
-
-    def close(self):
-        try:
-            if self.conn:
-                self.conn.close()
-        except:
-            pass
-
+# Dastlabki adminlarni qo'shish
+now = datetime.now().isoformat()
+for admin_id in ADMINS:
+    cursor.execute("INSERT OR IGNORE INTO admins (user_id, added_by, added_at) VALUES (?, ?, ?)",
+                   (admin_id, admin_id, now))
+conn.commit()
+print("✅ Database muvaffaqiyatli yuklandi!")
 
 # ================================================================
-# FAYL HANDLER
+# 3-BOT
 # ================================================================
-
-class FileHandler:
-    def __init__(self):
-        self.temp_dirs = []
-
-    def validate_file(self, file_path):
-        if not os.path.exists(file_path):
-            return False, "Fayl topilmadi"
-        file_size = os.path.getsize(file_path)
-        if file_size > MAX_FILE_SIZE:
-            return False, f"Fayl hajmi juda katta! Maksimal: {format_size(MAX_FILE_SIZE)}"
-        if file_size < MIN_FILE_SIZE:
-            return False, f"Fayl juda kichik (kamida {MIN_FILE_SIZE} bayt)"
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            return False, f"Faqat .py fayllar qabul qilinadi!"
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            if not content.strip():
-                return False, "Fayl bo'sh!"
-            for pattern in BLOCKED_PATTERNS:
-                if re.search(pattern, content, re.IGNORECASE):
-                    return False, "Xavfli kod aniqlandi!"
-        except Exception as e:
-            return False, f"Faylni o'qishda xato: {str(e)[:100]}"
-        return True, "OK"
-
-    def save_file(self, file_path, target_dir):
-        try:
-            safe_name = safe_filename(os.path.basename(file_path))
-            target_path = os.path.join(target_dir, safe_name)
-            os.makedirs(target_dir, exist_ok=True)
-            shutil.copy2(file_path, target_path)
-            return os.path.normpath(target_path)
-        except Exception as e:
-            log.error(f"Faylni saqlash xatosi: {e}")
-            return None
-
-    def get_file_hash(self, file_path):
-        hasher = hashlib.sha256()
-        try:
-            with open(file_path, 'rb') as f:
-                for chunk in iter(lambda: f.read(8192), b''):
-                    hasher.update(chunk)
-            return hasher.hexdigest()[:16]
-        except:
-            return ""
-
-    def create_temp_dir(self, prefix='deploy_'):
-        try:
-            path = tempfile.mkdtemp(prefix=prefix)
-            self.temp_dirs.append(path)
-            return path
-        except Exception as e:
-            log.error(f"Temp papka yaratish xatosi: {e}")
-            return None
-
-    def cleanup(self, path):
-        try:
-            if path and os.path.isdir(path):
-                shutil.rmtree(path, ignore_errors=True)
-            elif path and os.path.isfile(path):
-                os.remove(path)
-        except:
-            pass
-
-    def cleanup_all(self):
-        for path in self.temp_dirs:
-            self.cleanup(path)
-        self.temp_dirs.clear()
-
-
-# ================================================================
-# KOD TAHLILCHI
-# ================================================================
-
-class CodeAnalyzer:
-    def __init__(self):
-        self.bot_frameworks = {
-            'telebot': 'pyTelegramBotAPI',
-            'aiogram': 'aiogram',
-            'telegram.ext': 'python-telegram-bot',
-        }
-        self.token_patterns = [
-            (r'BOT_TOKEN\s*=\s*["\']([^"\']+)["\']', 'BOT_TOKEN='),
-            (r'bot_token\s*=\s*["\']([^"\']+)["\']', 'bot_token='),
-            (r'TOKEN\s*=\s*["\']([^"\']+)["\']', 'TOKEN='),
-            (r'API_TOKEN\s*=\s*["\']([^"\']+)["\']', 'API_TOKEN='),
-        ]
-
-    def analyze_code(self, file_path):
-        result = {
-            'valid': True,
-            'errors': [],
-            'warnings': [],
-            'framework': UNKNOWN_TEXT,
-            'has_token': False,
-            'token_pattern': None,
-            'has_requirements': False,
-            'requirements': [],
-            'imports': [],
-            'line_count': 0,
-            'file_size_kb': 0,
-            'code_quality_score': 100,
-            'is_aiogram': False,
-        }
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-        except Exception as e:
-            result['valid'] = False
-            result['errors'].append(f"Faylni o'qishda xato: {e}")
-            return result
-
-        file_size = os.path.getsize(file_path)
-        result['file_size_kb'] = round(file_size / 1024, 2)
-        result['line_count'] = content.count('\n') + 1
-
-        for key, name in self.bot_frameworks.items():
-            if key in content:
-                result['framework'] = name
-                if key == 'aiogram':
-                    result['is_aiogram'] = True
-                break
-
-        import_matches = re.findall(r'^(?:from|import)\s+([\w.]+)', content, re.MULTILINE)
-        result['imports'] = list(set(import_matches))
-
-        for pattern, name in self.token_patterns:
-            match = re.search(pattern, content)
-            if match:
-                result['has_token'] = True
-                result['token_pattern'] = name
-                break
-
-        req_path = os.path.join(os.path.dirname(file_path), 'requirements.txt')
-        if os.path.exists(req_path):
-            result['has_requirements'] = True
-            try:
-                with open(req_path, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith('#'):
-                            pkg = line.split('=')[0].split('>')[0].split('<')[0].strip()
-                            if pkg:
-                                result['requirements'].append(pkg)
-            except:
-                pass
-
-        try:
-            compile(content, file_path, 'exec')
-        except SyntaxError as e:
-            result['valid'] = False
-            result['errors'].append(f"Sintaksis xato: {e.lineno}-qatorda")
-
-        if not result['has_token']:
-            result['warnings'].append("Token topilmadi")
-            result['code_quality_score'] -= 20
-
-        if result['line_count'] < 10:
-            result['code_quality_score'] -= 15
-
-        result['code_quality_score'] = max(0, min(100, result['code_quality_score']))
-        return result
-
-    def get_analysis_text(self, analysis):
-        if not analysis['valid']:
-            return f"{EMOJI_CROSS} KODDA XATOLIKLAR BOR!\n\n" + "\n".join(f"• {e}" for e in analysis['errors'][:3])
-
-        framework_icon = "🤖" if analysis['is_aiogram'] else "📦"
-        txt = f"{EMOJI_CHECK} KOD TAHLILI\n\n"
-        txt += f"{framework_icon} Framework: {analysis['framework']}\n"
-        txt += f"{EMOJI_SIZE} Qatorlar: {analysis['line_count']}\n"
-        txt += f"{EMOJI_SIZE} Hajm: {analysis['file_size_kb']} KB\n"
-        txt += f"{EMOJI_KEY} Token: {'Bor' if analysis['has_token'] else 'Yo'}"
-        if analysis['token_pattern']:
-            txt += f" ({analysis['token_pattern']})"
-        txt += "\n"
-        txt += f"{EMOJI_BOX} Requirements: {'Bor' if analysis['has_requirements'] else 'Yo'}"
-        if analysis['requirements']:
-            txt += f" ({len(analysis['requirements'])} ta)"
-        txt += "\n"
-        txt += f"{EMOJI_ARROW} Importlar: {len(analysis['imports'])} ta\n"
-        txt += f"{EMOJI_STAR} Sifat baho: {analysis['code_quality_score']}/100\n"
-        return txt
-
-    def inject_token(self, file_path, token):
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-
-            patterns = [
-                r'BOT_TOKEN\s*=\s*["\'][^"\']*["\']',
-                r'bot_token\s*=\s*["\'][^"\']*["\']',
-                r'TOKEN\s*=\s*["\'][^"\']*["\']',
-                r'API_TOKEN\s*=\s*["\'][^"\']*["\']',
-            ]
-
-            replaced = False
-            for pattern in patterns:
-                new_content, count = re.subn(pattern, f'BOT_TOKEN = "{token}"', content, count=1)
-                if count > 0:
-                    content = new_content
-                    replaced = True
-                    break
-
-            if not replaced:
-                content = f'BOT_TOKEN = "{token}"\n\n' + content
-
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-            return True, "Token kiritildi"
-        except Exception as e:
-            return False, f"Token kiritish xatosi: {e}"
-
-
-# ================================================================
-# PROSESS MANAGER (TO'LIQ QAYTA TIKLANADI)
-# ================================================================
-
-class ProcessManager:
-    def __init__(self):
-        self.processes = {}
-        self._executor = ThreadPoolExecutor(max_workers=10)
-        self._running = True
-        self._start_monitor()
-
-    def _start_monitor(self):
-        def monitor():
-            while self._running:
-                try:
-                    for deploy_id, info in list(self.processes.items()):
-                        proc = info.get('process')
-                        if proc and proc.poll() is not None:
-                            exit_code = proc.returncode
-                            log.warning(f"Bot {deploy_id} to'xtadi (exit: {exit_code})")
-                            if AUTO_RESTART and exit_code != 0:
-                                rc = info.get('restart_count', 0)
-                                if rc < MAX_RESTART_ATTEMPTS:
-                                    log.info(f"Bot {deploy_id} qayta ishga tushirilmoqda...")
-                                    time.sleep(AUTO_RESTART_DELAY)
-                                    self.restart(deploy_id)
-                                else:
-                                    info['status'] = BOT_STATUS_FAILED
-                            else:
-                                info['status'] = BOT_STATUS_STOPPED
-                    time.sleep(PROCESS_CHECK_INTERVAL)
-                except Exception as e:
-                    log.error(f"Monitor xatosi: {e}")
-                    time.sleep(5)
-        threading.Thread(target=monitor, daemon=True).start()
-
-    def start_process(self, deploy_id, work_dir, main_file, token):
-        if deploy_id in self.processes:
-            self.stop(deploy_id, force=True)
-
-        env = os.environ.copy()
-        env['BOT_TOKEN'] = token
-        env['PYTHONUNBUFFERED'] = '1'
-        env['PYTHONIOENCODING'] = 'utf-8'
-        env['PYTHONUTF8'] = '1'
-
-        if not os.path.exists(main_file):
-            log.error(f"Fayl topilmadi: {main_file}")
-            return False, f"Asosiy fayl topilmadi: {main_file}"
-
-        main_file = os.path.abspath(main_file)
-        work_dir = os.path.abspath(work_dir)
-
-        log.info(f"Bot ishga tushirilmoqda:")
-        log.info(f"  Deploy ID: {deploy_id}")
-        log.info(f"  Work dir: {work_dir}")
-        log.info(f"  Main file: {main_file}")
-
-        try:
-            proc = subprocess.Popen(
-                [PYTHON_CMD, main_file],
-                cwd=work_dir,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-                text=True,
-                bufsize=1,
-                encoding='utf-8',
-                errors='replace',
-                shell=False
-            )
-
-            self.processes[deploy_id] = {
-                'process': proc,
-                'work_dir': work_dir,
-                'main_file': main_file,
-                'status': BOT_STATUS_RUNNING,
-                'started_at': str(datetime.now()),
-                'restart_count': 0,
-                'logs': [],
-                'token': token,
-            }
-            self._read_logs(deploy_id, proc)
-            log.info(f"Bot {deploy_id} ishga tushdi (PID: {proc.pid})")
-            return True, f"Bot ishga tushdi (PID: {proc.pid})"
-        except Exception as e:
-            log.error(f"Bot {deploy_id} ishga tushmadi: {e}")
-            return False, f"Ishga tushmadi: {str(e)[:100]}"
-
-    def _read_logs(self, deploy_id, proc):
-        def reader():
-            while True:
-                try:
-                    line = proc.stdout.readline()
-                    if not line:
-                        if proc.poll() is not None:
-                            break
-                        time.sleep(0.1)
-                        continue
-                    if deploy_id in self.processes:
-                        line = line.rstrip('\n\r')
-                        self.processes[deploy_id]['logs'].append(line)
-                        if len(self.processes[deploy_id]['logs']) > MAX_LOG_LINES:
-                            self.processes[deploy_id]['logs'] = self.processes[deploy_id]['logs'][-MAX_LOG_LINES//2:]
-                except Exception as e:
-                    log.error(f"Log reader xatosi: {e}")
-                    time.sleep(0.5)
-        self._executor.submit(reader)
-
-    def stop(self, deploy_id, force=False):
-        if deploy_id not in self.processes:
-            return False, "Bot topilmadi"
-        info = self.processes[deploy_id]
-        proc = info.get('process')
-        if not proc or proc.poll() is not None:
-            info['status'] = BOT_STATUS_STOPPED
-            return True, "Bot to'xtagan"
-        try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        except Exception as e:
-            if not force:
-                return False, f"To'xtatishda xato: {e}"
-        info['status'] = BOT_STATUS_STOPPED
-        info['stopped_at'] = str(datetime.now())
-        return True, "Bot to'xtatildi"
-
-    def restart(self, deploy_id):
-        if deploy_id not in self.processes:
-            return False, "Bot topilmadi"
-        info = self.processes[deploy_id]
-        old_rc = info.get('restart_count', 0)
-        self.stop(deploy_id, True)
-        time.sleep(1)
-        success, msg = self.start_process(deploy_id, info['work_dir'], info['main_file'], info['token'])
-        if success and deploy_id in self.processes:
-            self.processes[deploy_id]['restart_count'] = old_rc + 1
-            self.processes[deploy_id]['last_restart'] = str(datetime.now())
-        return success, msg
-
-    def get_status(self, deploy_id):
-        if deploy_id not in self.processes:
-            return None
-        info = self.processes[deploy_id]
-        proc = info.get('process')
-        is_running = proc and proc.poll() is None
-        uptime = 0
-        if is_running and info.get('started_at'):
-            try:
-                started = datetime.strptime(info['started_at'], '%Y-%m-%d %H:%M:%S.%f')
-                uptime = int((datetime.now() - started).total_seconds())
-            except:
-                pass
-        return {
-            'status': BOT_STATUS_RUNNING if is_running else BOT_STATUS_STOPPED,
-            'pid': proc.pid if proc else None,
-            'uptime_seconds': uptime,
-            'restart_count': info.get('restart_count', 0),
-            'log_lines': len(info.get('logs', [])),
-        }
-
-    def get_logs(self, deploy_id, limit=50):
-        if deploy_id not in self.processes:
-            return []
-        return self.processes[deploy_id].get('logs', [])[-limit:]
-
-    def get_process_info(self, deploy_id):
-        return self.processes.get(deploy_id)
-
-    # ========== MUHIM: QAYTA TIKLASH FUNKSIYASI ==========
-    def restore_all_bots(self, db):
-        """Server restartdan keyin barcha botlarni qayta ishga tushirish"""
-        # Barcha deploylarni olish
-        deploys = db.get_all_deploys()
-        
-        if not deploys:
-            log.info("Qayta tiklanadigan botlar yo'q")
-            return 0, 0
-        
-        log.info(f"Qayta tiklanadigan botlar: {len(deploys)} ta")
-        
-        restored = 0
-        failed = 0
-        
-        for deploy in deploys:
-            deploy_id = deploy['deploy_id']
-            work_dir = deploy['code_dir']
-            main_file = os.path.join(work_dir, deploy['main_file'])
-            token = deploy['bot_token']
-            
-            # Fayllar mavjudligini tekshirish
-            if not work_dir or not os.path.exists(work_dir):
-                log.warning(f"Bot {deploy_id} papkasi topilmadi: {work_dir}")
-                db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message="Papka topilmadi")
-                failed += 1
-                continue
-            
-            if not os.path.exists(main_file):
-                log.warning(f"Bot {deploy_id} asosiy fayli topilmadi: {main_file}")
-                db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message="Asosiy fayl topilmadi")
-                failed += 1
-                continue
-            
-            if not token:
-                log.warning(f"Bot {deploy_id} tokeni topilmadi")
-                db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message="Token topilmadi")
-                failed += 1
-                continue
-            
-            log.info(f"Bot qayta tiklanmoqda: {deploy_id} - {deploy['bot_username']}")
-            success, msg = self.start_process(deploy_id, work_dir, main_file, token)
-            
-            if success:
-                restored += 1
-                log.info(f"✅ Bot {deploy_id} qayta tiklandi")
-                db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, 
-                                       started_at=str(datetime.now()),
-                                       error_message=None)
-            else:
-                failed += 1
-                log.error(f"❌ Bot {deploy_id} qayta tiklanmadi: {msg}")
-                db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message=msg)
-            
-            time.sleep(0.5)
-        
-        log.info(f"Qayta tiklash yakunlandi: {restored} restored, {failed} failed")
-        return restored, failed
-
-    def stop_all(self):
-        for deploy_id in list(self.processes.keys()):
-            self.stop(deploy_id, True)
-        self._running = False
-
-    def cleanup(self, deploy_id):
-        self.stop(deploy_id, True)
-        if deploy_id in self.processes:
-            work_dir = self.processes[deploy_id].get('work_dir')
-            if work_dir and os.path.exists(work_dir):
-                shutil.rmtree(work_dir, ignore_errors=True)
-            del self.processes[deploy_id]
-
-    @property
-    def active_count(self):
-        return sum(1 for info in self.processes.values()
-                   if info.get('process') and info['process'].poll() is None)
-
-
-# ================================================================
-# TOKEN VALIDATOR
-# ================================================================
-
-class TokenValidator:
-    def __init__(self):
-        self._cache = {}
-        self._lock = threading.Lock()
-
-    async def validate(self, token):
-        if not token or len(token) < 30:
-            return False, "Token juda qisqa!", None
-        with self._lock:
-            if token in self._cache:
-                cached = self._cache[token]
-                if time.time() - cached['time'] < 300:
-                    return cached['valid'], cached['message'], cached['info']
-        try:
-            bot = Bot(token=token)
-            me = await bot.get_me()
-            await bot.session.close()
-            result = {'id': me.id, 'username': me.username, 'first_name': me.first_name}
-            with self._lock:
-                self._cache[token] = {'valid': True, 'message': f"@{me.username}", 'info': result, 'time': time.time()}
-            return True, f"@{me.username}", result
-        except Exception as e:
-            msg = "Token noto'g'ri yoki eskirgan!" if 'Unauthorized' in str(e) else f"Xato: {str(e)[:50]}"
-            with self._lock:
-                self._cache[token] = {'valid': False, 'message': msg, 'info': None, 'time': time.time()}
-            return False, msg, None
-
-    async def get_bot_username(self, token):
-        valid, msg, info = await self.validate(token)
-        return info.get('username') if valid and info else None
-
-
-# ================================================================
-# DEPLOY ENGINE
-# ================================================================
-
-class DeployEngine:
-    def __init__(self, db, pm, tv):
-        self.db = db
-        self.pm = pm
-        self.tv = tv
-        self.fh = FileHandler()
-        self.code_analyzer = CodeAnalyzer()
-        self.user_states = {}
-
-    def generate_deploy_id(self):
-        return generate_id("dep", 10)
-
-    async def deploy(self, user_id, file_path, bot_token):
-        deploy_id = self.generate_deploy_id()
-
-        valid, msg = self.fh.validate_file(file_path)
-        if not valid:
-            return None, msg, None
-
-        token_valid, token_msg, token_info = await self.tv.validate(bot_token)
-        if not token_valid:
-            return None, token_msg, None
-
-        bot_username = token_info.get('username', '') if token_info else ''
-        bot_name = token_info.get('first_name', '') if token_info else ''
-
-        analysis = self.code_analyzer.analyze_code(file_path)
-        if not analysis['valid']:
-            return None, "Kodda xatoliklar bor", analysis
-
-        deploy_dir = os.path.join(DEPLOY_DIR, deploy_id)
-        os.makedirs(deploy_dir, exist_ok=True)
-
-        saved_file = self.fh.save_file(file_path, deploy_dir)
-        if not saved_file:
-            self.fh.cleanup(deploy_dir)
-            return None, "Faylni saqlashda xatolik", analysis
-
-        self.code_analyzer.inject_token(saved_file, bot_token)
-
-        req_installed = False
-        if analysis['has_requirements'] and analysis['requirements']:
-            try:
-                result = subprocess.run([PYTHON_CMD, '-m', 'pip', 'install', '-q'] + analysis['requirements'],
-                                        cwd=deploy_dir, capture_output=True, text=True, timeout=120)
-                req_installed = result.returncode == 0
-            except:
-                pass
-
-        now = str(datetime.now())
-        file_hash = self.fh.get_file_hash(file_path)
-        file_size = os.path.getsize(file_path)
-
-        self.db.execute('''INSERT INTO deployments
-            (deploy_id, user_id, bot_token, bot_username, bot_name,
-             main_file, original_filename, file_hash, file_size,
-             code_dir, framework, has_requirements, requirements_installed,
-             status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (deploy_id, user_id, bot_token, bot_username, bot_name,
-             os.path.basename(saved_file), os.path.basename(file_path),
-             file_hash, file_size, deploy_dir,
-             analysis['framework'], 1 if analysis['has_requirements'] else 0,
-             1 if req_installed else 0, BOT_STATUS_STARTING, now, now))
-
-        success, proc_msg = self.pm.start_process(deploy_id, deploy_dir, saved_file, bot_token)
-
-        if success:
-            pid = self.pm.processes[deploy_id]['process'].pid
-            self.db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, pid=pid, started_at=now)
-            self.db.execute('UPDATE users SET bot_count=bot_count+1, total_deploys=total_deploys+1, '
-                            'successful_deploys=successful_deploys+1, last_active=? WHERE user_id=?', (now, user_id))
-            return deploy_id, proc_msg, analysis
-        else:
-            self.db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message=proc_msg)
-            self.db.execute('UPDATE users SET total_deploys=total_deploys+1, failed_deploys=failed_deploys+1, '
-                            'last_active=? WHERE user_id=?', (now, user_id))
-            return None, proc_msg, analysis
-
-    async def stop_bot(self, deploy_id, user_id):
-        deploy = self.db.get_deploy(deploy_id)
-        if not deploy or (deploy['user_id'] != user_id and user_id != OWNER_ID):
-            return False, "Bot topilmadi yoki sizga tegishli emas"
-        success, msg = self.pm.stop(deploy_id)
-        if success:
-            now = str(datetime.now())
-            self.db.update_deploy_status(deploy_id, BOT_STATUS_STOPPED, stopped_at=now)
-        return success, msg
-
-    async def restart_bot(self, deploy_id, user_id):
-        deploy = self.db.get_deploy(deploy_id)
-        if not deploy or (deploy['user_id'] != user_id and user_id != OWNER_ID):
-            return False, "Bot topilmadi"
-        proc_info = self.pm.get_process_info(deploy_id)
-        if not proc_info:
-            return False, "Bot jarayoni topilmadi"
-        success, msg = self.pm.restart(deploy_id)
-        if success:
-            now = str(datetime.now())
-            new_count = proc_info.get('restart_count', 0) + 1
-            self.db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, restart_count=new_count, last_restart=now)
-        return success, msg
-
-    async def start_bot(self, deploy_id, user_id):
-        deploy = self.db.get_deploy(deploy_id)
-        if not deploy or (deploy['user_id'] != user_id and user_id != OWNER_ID):
-            return False, "Bot topilmadi"
-        work_dir = deploy['code_dir']
-        main_file = os.path.join(work_dir, deploy['main_file'])
-        token = deploy['bot_token']
-        if not os.path.exists(main_file):
-            return False, "Asosiy fayl topilmadi"
-        success, msg = self.pm.start_process(deploy_id, work_dir, main_file, token)
-        if success:
-            now = str(datetime.now())
-            pid = self.pm.processes[deploy_id]['process'].pid
-            self.db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, pid=pid, started_at=now)
-        else:
-            self.db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message=msg)
-        return success, msg
-
-    async def delete_bot(self, deploy_id, user_id):
-        deploy = self.db.get_deploy(deploy_id)
-        if not deploy or (deploy['user_id'] != user_id and user_id != OWNER_ID):
-            return False, "Bot topilmadi"
-        self.pm.cleanup(deploy_id)
-        self.db.delete_deploy(deploy_id)
-        self.db.execute('UPDATE users SET bot_count=MAX(bot_count-1,0), last_active=? WHERE user_id=?',
-                        (str(datetime.now()), user_id))
-        return True, "Bot o'chirildi"
-
-    async def get_bot_status(self, deploy_id):
-        pm_status = self.pm.get_status(deploy_id)
-        if not pm_status:
-            deploy = self.db.get_deploy(deploy_id)
-            if deploy:
-                return {'status': deploy['status'], 'pid': deploy['pid'], 'uptime_seconds': 0,
-                        'restart_count': deploy['restart_count'], 'log_lines': 0, 'deploy_id': deploy_id,
-                        'bot_username': deploy['bot_username'], 'bot_name': deploy['bot_name'],
-                        'main_file': deploy['main_file'], 'framework': deploy['framework'],
-                        'created_at': deploy['created_at'], 'error_message': deploy['error_message']}
-            return None
-        deploy = self.db.get_deploy(deploy_id)
-        if not deploy:
-            return None
-        return {**pm_status, 'deploy_id': deploy_id, 'bot_username': deploy['bot_username'],
-                'bot_name': deploy['bot_name'], 'main_file': deploy['main_file'],
-                'framework': deploy['framework'], 'created_at': deploy['created_at'],
-                'error_message': deploy['error_message']}
-
-    async def get_user_bots(self, user_id, limit=50):
-        return self.db.get_user_deploys(user_id, limit)
-
-    async def get_logs(self, deploy_id, limit=50):
-        return self.pm.get_logs(deploy_id, limit)
-
-    def set_user_state(self, user_id, state, data=None):
-        self.user_states[user_id] = {'state': state, 'data': data or {}, 'updated': str(datetime.now())}
-
-    def get_user_state(self, user_id):
-        return self.user_states.get(user_id)
-
-    def clear_user_state(self, user_id):
-        if user_id in self.user_states:
-            del self.user_states[user_id]
-
-
-# ================================================================
-# SHABLONLAR
-# ================================================================
-
-class TemplateManager:
-    TEMPLATES = {
-        'simple': {
-            'name': 'Simple Bot (Telebot)',
-            'description': 'Eng oddiy telebot shabloni',
-            'framework': 'telebot',
-            'code': '''import telebot
-
-BOT_TOKEN = "YOUR_TOKEN_HERE"
-bot = telebot.TeleBot(BOT_TOKEN)
-
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.reply_to(message, "Assalomu alaykum! Men simple botman.")
-
-@bot.message_handler(func=lambda m: True)
-def echo(message):
-    bot.reply_to(message, f"Siz yozdingiz: {message.text}")
-
-if __name__ == "__main__":
-    print("Bot ishga tushdi...")
-    bot.infinity_polling()
-''',
-        },
-        'aiogram_simple': {
-            'name': 'Aiogram Simple Bot',
-            'description': 'Eng oddiy aiogram bot shabloni',
-            'framework': 'aiogram',
-            'code': '''import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-
-BOT_TOKEN = "YOUR_TOKEN_HERE"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+logging.basicConfig(level=logging.INFO)
 
+# ================================================================
+# 4-LOCAL RASM FUNKSIYALARI
+# ================================================================
+def get_start_image():
+    return FSInputFile(START_IMAGE_PATH) if os.path.exists(START_IMAGE_PATH) else None
+
+def get_admin_image():
+    return FSInputFile(ADMIN_IMAGE_PATH) if os.path.exists(ADMIN_IMAGE_PATH) else None
+
+# ================================================================
+# 5-MAJBURIY A'ZOLIK FUNKSIYALARI
+# ================================================================
+async def check_subscription(user_id: int) -> Tuple[bool, List[str]]:
+    """Foydalanuvchi barcha aktiv majburiy kanallarga a'zoligini tekshiradi"""
+    cursor.execute("SELECT id, channel_username FROM forced_channels WHERE is_active = 1")
+    channels = cursor.fetchall()
+    if not channels:
+        return True, []
+
+    not_subscribed = []
+    for ch_id, channel_username in channels:
+        clean_channel = channel_username.replace('@', '').strip()
+        if not clean_channel:
+            cursor.execute("UPDATE forced_channels SET is_active = 0 WHERE id = ?", (ch_id,))
+            conn.commit()
+            continue
+
+        try:
+            member = await bot.get_chat_member(chat_id=f"@{clean_channel}", user_id=user_id)
+            if member.status in ['left', 'kicked']:
+                not_subscribed.append(f"@{clean_channel}")
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "chat not found" in error_msg or "invalid username" in error_msg:
+                cursor.execute("UPDATE forced_channels SET is_active = 0 WHERE id = ?", (ch_id,))
+                conn.commit()
+                logging.warning(f"⚠️ Kanal {channel_username} topilmadi, o'chirildi.")
+            elif "bot is not a member" in error_msg:
+                cursor.execute("UPDATE forced_channels SET is_active = 0 WHERE id = ?", (ch_id,))
+                conn.commit()
+                logging.warning(f"⚠️ Bot {channel_username} kanaliga a'zo emas, kanal o'chirildi.")
+            else:
+                not_subscribed.append(f"@{clean_channel}")
+                logging.error(f"Kanal tekshirish xatosi {channel_username}: {e}")
+    return len(not_subscribed) == 0, not_subscribed
+
+async def get_subscription_keyboard(not_subscribed: List[str]) -> InlineKeyboardMarkup:
+    """A'zo bo'lmagan kanallar uchun tugmalar"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    for ch in not_subscribed:
+        clean = ch.replace('@', '')
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text=f"📢 {ch}", url=f"https://t.me/{clean}")
+        ])
+    keyboard.inline_keyboard.append([InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_sub")])
+    return keyboard
+
+# ================================================================
+# 6-MIDDLEWARE
+# ================================================================
+class SubscriptionMiddleware(BaseMiddleware):
+    """Barcha handlerlarni majburiy a'zolikka tekshiradi"""
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        user_id = None
+        if isinstance(event, Message):
+            user_id = event.from_user.id
+        elif isinstance(event, CallbackQuery):
+            user_id = event.from_user.id
+        else:
+            return await handler(event, data)
+
+        # Istisnolar: /start va check_sub
+        if isinstance(event, Message):
+            if event.text and event.text.startswith("/start"):
+                return await handler(event, data)
+        elif isinstance(event, CallbackQuery):
+            if event.data == "check_sub":
+                return await handler(event, data)
+
+        subscribed, not_subscribed = await check_subscription(user_id)
+        if not subscribed:
+            text = "❌ Botdan foydalanish uchun quyidagi kanallarga a'zo bo'ling:\n\n" + "\n".join(not_subscribed)
+            keyboard = await get_subscription_keyboard(not_subscribed)
+            if isinstance(event, Message):
+                await event.answer(text, reply_markup=keyboard, parse_mode="HTML")
+            else:
+                await event.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+            return
+        return await handler(event, data)
+
+# Middleware-ni ro'yxatdan o'tkazish
+dp.message.middleware(SubscriptionMiddleware())
+dp.callback_query.middleware(SubscriptionMiddleware())
+
+# ================================================================
+# 7-STATE'LAR
+# ================================================================
+class ForcedChannelState(StatesGroup):
+    waiting_for_channel = State()
+
+class AddMediaState(StatesGroup):
+    type = State()
+    name = State()
+    code = State()
+    description = State()
+    image = State()
+    genre = State()
+    status = State()
+    season = State()
+    voice = State()
+    sponsor = State()
+    quality = State()
+
+class AddPartState(StatesGroup):
+    select_media = State()
+    part_number = State()
+    video = State()
+    caption = State()
+
+class AddMultiplePartsState(StatesGroup):
+    select_media = State()
+    videos = State()
+
+class EditMediaState(StatesGroup):
+    select = State()
+    field = State()
+    value = State()
+
+class EditPartState(StatesGroup):
+    select_media = State()
+    select_part = State()
+    field = State()
+    value = State()
+
+class BroadcastState(StatesGroup):
+    message = State()
+
+class AdminManageState(StatesGroup):
+    action = State()
+    user_id = State()
+
+class SearchState(StatesGroup):
+    query = State()
+    search_type = State()
+
+class PostState(StatesGroup):
+    media_id = State()
+    channel = State()
+    confirm = State()
+
+class PartPostState(StatesGroup):
+    media_id = State()
+    part_id = State()
+    channel = State()
+    confirm = State()
+
+class CodeSearchState(StatesGroup):
+    waiting_for_code = State()
+
+class ImageSearchState(StatesGroup):
+    waiting_for_image = State()
+
+# ================================================================
+# 8-TUGMALAR
+# ================================================================
+def start_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Kod orqali qidiruv", callback_data="search_by_code")],
+        [InlineKeyboardButton(text="🎬 Anime Qidiruv", callback_data="search_anime"),
+         InlineKeyboardButton(text="🎭 Drama Qidiruv", callback_data="search_drama")],
+        [InlineKeyboardButton(text="🖼 Rasm Orqali Anime Qidiruv", callback_data="search_image"),
+         InlineKeyboardButton(text="📖 Qo'llanma", callback_data="guide")],
+        [InlineKeyboardButton(text="📢 Reklama", callback_data="advertisement"),
+         InlineKeyboardButton(text="📋 Ro'yxat", callback_data="list_all")],
+        [InlineKeyboardButton(text="🔐 Admin Panel", callback_data="admin_panel")]
+    ])
+
+def admin_menu():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="➕ Media Qo'shish"), KeyboardButton(text="➕ Qism Qo'shish")],
+        [KeyboardButton(text="➕ Ko'p Qism Qo'shish"), KeyboardButton(text="✏️ Media Tahrirlash")],
+        [KeyboardButton(text="✏️ Qismni Tahrirlash"), KeyboardButton(text="📊 Statistika")],
+        [KeyboardButton(text="📢 Xabar Yuborish"), KeyboardButton(text="🔗 Majburiy A'zo")],
+        [KeyboardButton(text="👑 Admin Qo'shish"), KeyboardButton(text="📨 Post Qilish")],
+        [KeyboardButton(text="🎬 Qismni Post Qilish"), KeyboardButton(text="🔙 Asosiy menyu")]
+    ], resize_keyboard=True)
+
+def admin_manage_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Admin Qo'shish", callback_data="admin_add")],
+        [InlineKeyboardButton(text="❌ Admin Chiqarish", callback_data="admin_remove")],
+        [InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_admin_reply")]
+    ])
+
+def forced_channel_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="forced_add")],
+        [InlineKeyboardButton(text="❌ Kanal o'chirish", callback_data="forced_remove")],
+        [InlineKeyboardButton(text="📋 Kanallar ro'yxati", callback_data="forced_list")],
+        [InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_admin_reply")]
+    ])
+
+def forced_channel_list_keyboard(page=0):
+    cursor.execute("SELECT id, channel_username, is_active FROM forced_channels ORDER BY channel_username")
+    channels = cursor.fetchall()
+    per_page = 10
+    start = page * per_page
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    for ch_id, channel, active in channels[start:start+per_page]:
+        status = "✅" if active else "❌"
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text=f"{status} {channel}", callback_data=f"forced_del_{ch_id}")
+        ])
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️", callback_data=f"forced_page_{page-1}"))
+    if start + per_page < len(channels):
+        nav_buttons.append(InlineKeyboardButton(text="➡️", callback_data=f"forced_page_{page+1}"))
+    if nav_buttons:
+        keyboard.inline_keyboard.append(nav_buttons)
+    keyboard.inline_keyboard.append([InlineKeyboardButton(text="🔙 Ortga", callback_data="back_to_forced_menu")])
+    return keyboard
+
+def media_list_keyboard(media_type=None, page=0):
+    builder = InlineKeyboardBuilder()
+    if media_type:
+        cursor.execute("SELECT id, name, code FROM media WHERE type = ? ORDER BY name", (media_type,))
+    else:
+        cursor.execute("SELECT id, name, code FROM media ORDER BY name")
+    media_list = cursor.fetchall()
+    per_page = 10
+    start = page * per_page
+    for media_id, name, code in media_list[start:start+per_page]:
+        builder.button(text=f"{name} [{code}]", callback_data=f"select_media_{media_id}")
+    builder.adjust(1)
+    if page > 0:
+        builder.row(InlineKeyboardButton(text="⬅️", callback_data=f"media_page_{page-1}_{media_type or ''}"))
+    if start+per_page < len(media_list):
+        builder.row(InlineKeyboardButton(text="➡️", callback_data=f"media_page_{page+1}_{media_type or ''}"))
+    builder.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_admin_reply"))
+    return builder.as_markup()
+
+def parts_list_keyboard(media_id, page=0):
+    builder = InlineKeyboardBuilder()
+    cursor.execute("SELECT part_number, id FROM parts WHERE media_id = ? ORDER BY part_number", (media_id,))
+    parts = cursor.fetchall()
+    per_page = 20
+    start = page * per_page
+    for part_num, part_id in parts[start:start+per_page]:
+        builder.button(text=f"📹 {part_num}-qism", callback_data=f"select_part_{part_id}")
+    builder.adjust(2)
+    if page > 0:
+        builder.row(InlineKeyboardButton(text="⬅️", callback_data=f"parts_page_{media_id}_{page-1}"))
+    if start+per_page < len(parts):
+        builder.row(InlineKeyboardButton(text="➡️", callback_data=f"parts_page_{media_id}_{page+1}"))
+    builder.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data=f"back_to_media_{media_id}"))
+    return builder.as_markup()
+
+def watch_parts_keyboard(media_id, page=0):
+    builder = InlineKeyboardBuilder()
+    cursor.execute("SELECT part_number FROM parts WHERE media_id = ? ORDER BY part_number", (media_id,))
+    parts = cursor.fetchall()
+    per_page = 10
+    start = page * per_page
+    for part_num in parts[start:start+per_page]:
+        builder.button(text=f"{part_num[0]}", callback_data=f"watch_part_{media_id}_{part_num[0]}")
+    builder.adjust(5)
+    if page > 0:
+        builder.row(InlineKeyboardButton(text="⬅️", callback_data=f"watch_parts_page_{media_id}_{page-1}"))
+    if start+per_page < len(parts):
+        builder.row(InlineKeyboardButton(text="➡️", callback_data=f"watch_parts_page_{media_id}_{page+1}"))
+    builder.row(InlineKeyboardButton(text="🔙 Ortga", callback_data=f"view_media_{media_id}"))
+    return builder.as_markup()
+
+def edit_media_fields_keyboard(media_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Nomi", callback_data=f"edit_media_{media_id}_name")],
+        [InlineKeyboardButton(text="🔢 Kod", callback_data=f"edit_media_{media_id}_code")],
+        [InlineKeyboardButton(text="📄 Tavsif", callback_data=f"edit_media_{media_id}_description")],
+        [InlineKeyboardButton(text="🖼 Rasm", callback_data=f"edit_media_{media_id}_image")],
+        [InlineKeyboardButton(text="🎭 Janr", callback_data=f"edit_media_{media_id}_genre")],
+        [InlineKeyboardButton(text="📊 Holat", callback_data=f"edit_media_{media_id}_status")],
+        [InlineKeyboardButton(text="🎬 Sezon", callback_data=f"edit_media_{media_id}_season")],
+        [InlineKeyboardButton(text="🎙 Ovoz", callback_data=f"edit_media_{media_id}_voice")],
+        [InlineKeyboardButton(text="🤝 Himoy", callback_data=f"edit_media_{media_id}_sponsor")],
+        [InlineKeyboardButton(text="📀 Sifat", callback_data=f"edit_media_{media_id}_quality")],
+        [InlineKeyboardButton(text="🔙 Orqaga", callback_data=f"back_to_media_{media_id}")]
+    ])
+
+def edit_part_fields_keyboard(part_id, media_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📹 Video", callback_data=f"edit_part_{part_id}_video")],
+        [InlineKeyboardButton(text="📝 Caption", callback_data=f"edit_part_{part_id}_caption")],
+        [InlineKeyboardButton(text="🔢 Qism raqami", callback_data=f"edit_part_{part_id}_number")],
+        [InlineKeyboardButton(text="🔙 Orqaga", callback_data=f"back_to_parts_{media_id}")]
+    ])
+
+def status_keyboard(media_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Davom etmoqda", callback_data=f"set_status_{media_id}_ongoing")],
+        [InlineKeyboardButton(text="✅ Tugallangan", callback_data=f"set_status_{media_id}_completed")],
+        [InlineKeyboardButton(text="⏸ To'xtatilgan", callback_data=f"set_status_{media_id}_hiatus")],
+        [InlineKeyboardButton(text="🔙 Orqaga", callback_data=f"back_to_media_{media_id}")]
+    ])
+
+# ================================================================
+# 9-YORDAMCHI FUNKSIYALAR
+# ================================================================
+def is_admin(user_id: int) -> bool:
+    cursor.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
+    return cursor.fetchone() is not None
+
+def is_owner(user_id: int) -> bool:
+    return user_id in ADMINS
+
+async def add_user(user) -> None:
+    cursor.execute("INSERT OR IGNORE INTO users (id, username, first_name, last_name, registered_at, last_active) VALUES (?, ?, ?, ?, ?, ?)",
+                   (user.id, user.username, user.first_name, user.last_name, datetime.now().isoformat(), datetime.now().isoformat()))
+    conn.commit()
+
+async def update_user_activity(user_id: int) -> None:
+    cursor.execute("UPDATE users SET last_active = ? WHERE id = ?", (datetime.now().isoformat(), user_id))
+    conn.commit()
+
+async def safe_send_message(chat_id: int, text: str, **kwargs):
+    try:
+        return await bot.send_message(chat_id, text, **kwargs)
+    except Exception as e:
+        logging.error(f"Xabar yuborish xatosi: {e}")
+        return None
+
+async def safe_send_photo(chat_id: int, photo, caption=None, **kwargs):
+    try:
+        return await bot.send_photo(chat_id, photo, caption=caption, **kwargs)
+    except Exception as e:
+        logging.error(f"Rasm yuborish xatosi: {e}")
+        return await safe_send_message(chat_id, caption if caption else "Rasm yuborib bo'lmadi!", **kwargs)
+
+async def safe_send_video(chat_id: int, video, caption=None, **kwargs):
+    try:
+        return await bot.send_video(chat_id, video, caption=caption, **kwargs)
+    except Exception as e:
+        logging.error(f"Video yuborish xatosi: {e}")
+        return None
+
+async def send_text_file(chat_id: int, text: str, filename: str):
+    try:
+        file = io.BytesIO(text.encode('utf-8'))
+        document = BufferedInputFile(file.getvalue(), filename=filename)
+        await bot.send_document(chat_id, document)
+    except Exception as e:
+        logging.error(f"Fayl yuborish xatosi: {e}")
+
+async def view_media_by_id(message: Message, media_id: int):
+    try:
+        cursor.execute("SELECT name, type, description, image_url, genre, status, season, total_parts, views, code, voice, sponsor, quality FROM media WHERE id = ?", (media_id,))
+        media = cursor.fetchone()
+        if not media:
+            await safe_send_message(message.chat.id, "❌ Media topilmadi!")
+            return
+        name, media_type, desc, image, genre, status, season, total_parts, views, code, voice, sponsor, quality = media
+        cursor.execute("UPDATE media SET views = views + 1 WHERE id = ?", (media_id,))
+        conn.commit()
+        
+        status_text = {"ongoing": "🟢 Davom etmoqda", "completed": "✅ Tugallangan", "hiatus": "⏸ To'xtatilgan"}.get(status, "❓")
+        voice_text = voice if voice else f"{AUTHOR_USERNAME}"
+        sponsor_text = sponsor if sponsor else "AniCity Rasmiy"
+        
+        text = f"""
+┌─────────────────────────────────
+🎬 <b>{name}</b>
+└─────────────────────────────────
+
+┌─────────────────────────────────
+• Janr: {genre}
+• Sezon: {season}
+• Qism: {total_parts} ta
+• Holati: {status_text}
+• Ovoz: {voice_text}
+• Himoy: {sponsor_text}
+• Sifat: {quality}
+└─────────────────────────────────
+
+🔢 Kod: <code>{code}</code>
+📢 Kanal: {MAIN_CHANNEL}
+"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📺 Tomosha qilish", callback_data=f"watch_parts_{media_id}")],
+            [InlineKeyboardButton(text="🔙 Ortga", callback_data="back_to_start")]
+        ])
+        
+        if image and (image.startswith("http") or image.startswith("AgA")):
+            await safe_send_photo(message.chat.id, photo=image, caption=text, reply_markup=keyboard, parse_mode="HTML")
+        else:
+            await safe_send_message(message.chat.id, text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"view_media_by_id xatosi: {e}")
+        await safe_send_message(message.chat.id, "❌ Xatolik yuz berdi!")
+
+# ================================================================
+# 10-START HANDLER
+# ================================================================
 @dp.message(Command("start"))
-async def start(message: types.Message):
-    await message.answer("Assalomu alaykum! Men aiogram botman!")
+async def start(message: Message):
+    await add_user(message.from_user)
+    
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("code_"):
+        code = args[1].replace("code_", "")
+        if "&part=" in code:
+            code, part_num = code.split("&part=")
+            try:
+                code_int = int(code)
+                part_num_int = int(part_num)
+                cursor.execute("SELECT id FROM media WHERE code = ?", (code_int,))
+                media = cursor.fetchone()
+                if media:
+                    cursor.execute("SELECT file_id, caption FROM parts WHERE media_id = ? AND part_number = ?", (media[0], part_num_int))
+                    part = cursor.fetchone()
+                    if part:
+                        cursor.execute("SELECT name FROM media WHERE id = ?", (media[0],))
+                        media_name = cursor.fetchone()[0]
+                        full_caption = f"🎬 {media_name}\n📹 {part_num_int}-qism\n\n{part[1] if part[1] else ''}"
+                        await safe_send_video(message.chat.id, video=part[0], caption=full_caption, parse_mode="HTML")
+                        return
+            except:
+                pass
+        else:
+            try:
+                code_int = int(code)
+                cursor.execute("SELECT id FROM media WHERE code = ?", (code_int,))
+                media = cursor.fetchone()
+                if media:
+                    await view_media_by_id(message, media[0])
+                    return
+            except:
+                pass
+    
+    start_image = get_start_image()
+    welcome_text = (
+        "🎬 <b>AniCity Rasmiy Bot</b> 🎬\n\n"
+        "✨ <b>Botimizga xush kelibsiz!</b> ✨\n\n"
+        "📚 <b>Bot imkoniyatlari:</b>\n"
+        "🔍 Kod orqali qidiruv\n"
+        "🎬 Anime va dramalarni nom bilan qidirish\n"
+        "🖼 Rasm orqali anime topish\n"
+        "📺 Barcha qismlarni tomosha qilish\n\n"
+        f"📢 <b>Asosiy kanal:</b> {MAIN_CHANNEL}\n"
+        f"👨‍💻 <b>Muallif:</b> <a href='{AUTHOR_LINK}'>{AUTHOR_USERNAME}</a>\n"
+        f"🆘 <b>Yordam:</b> <a href='{SUPPORT_LINK}'>{SUPPORT_USERNAME}</a>\n\n"
+        "⬇️ <b>Quyidagi tugmalardan birini tanlang:</b> ⬇️"
+    )
+    if start_image:
+        await safe_send_photo(message.chat.id, photo=start_image, caption=welcome_text, reply_markup=start_menu(), parse_mode="HTML")
+    else:
+        await safe_send_message(message.chat.id, welcome_text, reply_markup=start_menu(), parse_mode="HTML")
 
+@dp.callback_query(F.data == "check_sub")
+async def check_sub_callback(callback: CallbackQuery):
+    subscribed, not_subscribed = await check_subscription(callback.from_user.id)
+    if subscribed:
+        await callback.message.delete()
+        start_image = get_start_image()
+        welcome_text = (
+            "🎬 <b>AniCity Rasmiy Bot</b> 🎬\n\n"
+            "✅ Siz barcha kanallarga a'zo bo'ldingiz!\n"
+            "Endi botdan foydalanishingiz mumkin."
+        )
+        if start_image:
+            await safe_send_photo(callback.from_user.id, photo=start_image, caption=welcome_text, reply_markup=start_menu(), parse_mode="HTML")
+        else:
+            await safe_send_message(callback.from_user.id, welcome_text, reply_markup=start_menu(), parse_mode="HTML")
+    else:
+        text = "❌ Hali ham quyidagi kanallarga a'zo emassiz:\n\n" + "\n".join(not_subscribed)
+        keyboard = await get_subscription_keyboard(not_subscribed)
+        try:
+            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except:
+            await safe_send_message(callback.from_user.id, text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_start")
+async def back_to_start(callback: CallbackQuery):
+    start_image = get_start_image()
+    welcome_text = (
+        "🎬 <b>AniCity Rasmiy Bot</b> 🎬\n\n"
+        "✨ <b>Botimizga xush kelibsiz!</b> ✨\n\n"
+        "📚 <b>Bot imkoniyatlari:</b>\n"
+        "🔍 Kod orqali qidiruv\n"
+        "🎬 Anime va dramalarni nom bilan qidirish\n"
+        "🖼 Rasm orqali anime topish\n"
+        "📺 Barcha qismlarni tomosha qilish\n\n"
+        f"📢 <b>Asosiy kanal:</b> {MAIN_CHANNEL}\n"
+        f"👨‍💻 <b>Muallif:</b> <a href='{AUTHOR_LINK}'>{AUTHOR_USERNAME}</a>\n"
+        f"🆘 <b>Yordam:</b> <a href='{SUPPORT_LINK}'>{SUPPORT_USERNAME}</a>\n\n"
+        "⬇️ <b>Quyidagi tugmalardan birini tanlang:</b> ⬇️"
+    )
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    if start_image:
+        await safe_send_photo(callback.from_user.id, photo=start_image, caption=welcome_text, reply_markup=start_menu(), parse_mode="HTML")
+    else:
+        await safe_send_message(callback.from_user.id, welcome_text, reply_markup=start_menu(), parse_mode="HTML")
+    await callback.answer()
+
+# ================================================================
+# 11-KOD ORQALI QIDIRUV
+# ================================================================
+@dp.callback_query(F.data == "search_by_code")
+async def search_by_code_start(callback: CallbackQuery, state: FSMContext):
+    await update_user_activity(callback.from_user.id)
+    await state.set_state(CodeSearchState.waiting_for_code)
+    text = "🔍 Qidirilishi kerak bo'lgan anime yoki drama kodini yuboring"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_start")]])
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except:
+        await safe_send_message(callback.from_user.id, text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(CodeSearchState.waiting_for_code)
+async def search_by_code(message: Message, state: FSMContext):
+    await update_user_activity(message.from_user.id)
+    text = message.text.strip()
+    
+    if not text.isdigit():
+        await message.answer("❌ Iltimos, faqat raqam (kod) yuboring!")
+        return
+    
+    code = int(text)
+    cursor.execute("SELECT id FROM media WHERE code = ?", (code,))
+    media = cursor.fetchone()
+    
+    if media:
+        await view_media_by_id(message, media[0])
+    else:
+        await message.answer(f"❌ '{code}' kodli media topilmadi!")
+    
+    await state.clear()
+
+# ================================================================
+# 12-NOM BO'YICHA QIDIRUV
+# ================================================================
+@dp.callback_query(F.data == "search_anime")
+async def search_anime_start(callback: CallbackQuery, state: FSMContext):
+    await update_user_activity(callback.from_user.id)
+    await state.update_data(search_type="anime")
+    await state.set_state(SearchState.query)
+    text = "🔍 Qidirilishi kerak bo'lgan anime nomini yuboring"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_start")]])
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except:
+        await safe_send_message(callback.from_user.id, text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "search_drama")
+async def search_drama_start(callback: CallbackQuery, state: FSMContext):
+    await update_user_activity(callback.from_user.id)
+    await state.update_data(search_type="drama")
+    await state.set_state(SearchState.query)
+    text = "🔍 Qidirilishi kerak bo'lgan drama nomini yuboring"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_start")]])
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except:
+        await safe_send_message(callback.from_user.id, text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(SearchState.query)
+async def search_media_query(message: Message, state: FSMContext):
+    query = message.text.strip()
+    data = await state.get_data()
+    search_type = data.get('search_type', 'anime')
+    media_type = "anime" if search_type == "anime" else "drama"
+    
+    cursor.execute("SELECT id, name, type, total_parts, status, code FROM media WHERE type = ? AND name LIKE ? ORDER BY name", (media_type, f"%{query}%"))
+    results = cursor.fetchall()
+    
+    if not results:
+        await safe_send_message(message.chat.id, f"❌ '{query}' bo'yicha hech narsa topilmadi!")
+        await state.clear()
+        return
+    
+    builder = InlineKeyboardBuilder()
+    for media_id, name, m_type, parts, status, code in results:
+        status_emoji = "🟢" if status == "ongoing" else "✅" if status == "completed" else "⏸"
+        builder.button(text=f"{'🎬' if m_type=='anime' else '🎭'} {name} [{code}] {status_emoji} ({parts} qism)", callback_data=f"view_media_{media_id}")
+    builder.adjust(1)
+    builder.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_start"))
+    
+    await safe_send_message(message.chat.id, f"🔍 '{query}' bo'yicha topilganlar ({len(results)}):", reply_markup=builder.as_markup())
+    await state.clear()
+
+# ================================================================
+# 13-RASM ORQALI QIDIRUV (Haqiqiy API bilan)
+# ================================================================
+@dp.callback_query(F.data == "search_image")
+async def search_image_start(callback: CallbackQuery, state: FSMContext):
+    await update_user_activity(callback.from_user.id)
+    await state.set_state(ImageSearchState.waiting_for_image)
+    text = (
+        "🖼 RASM ORQALI ANIME QIDIRUV\n\n"
+        "Qidirmoqchi bo'lgan animening rasmni yuboring.\n\n"
+        "📌 QO'LLANMA:\n"
+        "• Animening skrinshotini yuboring\n"
+        "• Anime posteri yoki banneri EMAS\n\n"
+        "Bot rasmni tahlil qilib, eng mos animeni topadi."
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_start")]])
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except:
+        await safe_send_message(callback.from_user.id, text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(ImageSearchState.waiting_for_image, F.photo)
+async def search_by_image(message: Message, state: FSMContext):
+    await update_user_activity(message.from_user.id)
+    
+    await message.answer("🖼 Rasm qabul qilindi! 🔍 Qidiruv boshlanmoqda...")
+    
+    # Haqiqiy rasm tahlili uchun trace.moe API dan foydalanamiz
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    file_bytes = await bot.download_file(file.file_path)
+    
+    import aiohttp
+    import base64
+    
+    # Rasmni base64 ga o'tkazish
+    image_base64 = base64.b64encode(file_bytes.read()).decode('utf-8')
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            # trace.moe API ga so'rov yuborish
+            async with session.post('https://api.trace.moe/search', data={'image': image_base64}) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    if result.get('result') and len(result['result']) > 0:
+                        top_result = result['result'][0]
+                        anime_name = top_result.get('filename', 'Noma\'lum')
+                        similarity = top_result.get('similarity', 0) * 100
+                        episode = top_result.get('episode', '?')
+                        
+                        # Bazadan shu nomdagi animeni qidirish
+                        cursor.execute("SELECT id, name, code FROM media WHERE name LIKE ? LIMIT 5", (f"%{anime_name}%",))
+                        media_results = cursor.fetchall()
+                        
+                        if media_results:
+                            text = f"🔍 Topilgan anime: <b>{anime_name}</b>\n📊 Aniqlik: {similarity:.1f}%\n📺 Epizod: {episode}\n\n"
+                            builder = InlineKeyboardBuilder()
+                            for media_id, name, code in media_results:
+                                builder.button(text=f"🎬 {name} [{code}]", callback_data=f"view_media_{media_id}")
+                            builder.adjust(1)
+                            builder.row(InlineKeyboardButton(text="🔙 Ortga", callback_data="back_to_start"))
+                            await safe_send_message(message.chat.id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+                        else:
+                            await message.answer(f"🔍 Topilgan anime: <b>{anime_name}</b>\n📊 Aniqlik: {similarity:.1f}%\n\n❌ Bu anime botda topilmadi!", parse_mode="HTML")
+                    else:
+                        await message.answer("❌ Hech qanday anime topilmadi! Boshqa rasm yuborib ko'ring.")
+                else:
+                    await message.answer("❌ API xatolik! Keyinroq urinib ko'ring.")
+        except Exception as e:
+            logging.error(f"Rasm qidiruv xatosi: {e}")
+            # API ishlamasa, bazadagi birinchi 10 ta mediadan taklif qilamiz
+            cursor.execute("SELECT id, name, code FROM media LIMIT 10")
+            media_list = cursor.fetchall()
+            if media_list:
+                text = "🔍 API vaqtincha ishlamayapti. Quyidagi animelarni ko'ring:\n\n"
+                builder = InlineKeyboardBuilder()
+                for media_id, name, code in media_list:
+                    builder.button(text=f"🎬 {name} [{code}]", callback_data=f"view_media_{media_id}")
+                builder.adjust(1)
+                builder.row(InlineKeyboardButton(text="🔙 Ortga", callback_data="back_to_start"))
+                await safe_send_message(message.chat.id, text, reply_markup=builder.as_markup())
+            else:
+                await message.answer("❌ Hech qanday anime topilmadi! Keyinroq urinib ko'ring.")
+    
+    await state.clear()
+
+@dp.message(ImageSearchState.waiting_for_image)
+async def search_by_image_invalid(message: Message, state: FSMContext):
+    await message.answer("❌ Iltimos, rasm yuboring!")
+
+# ================================================================
+# 14-GUIDE, ADVERTISEMENT, LIST ALL
+# ================================================================
+@dp.callback_query(F.data == "guide")
+async def guide_start(callback: CallbackQuery):
+    await update_user_activity(callback.from_user.id)
+    text = (
+        "📚 Botni ishlatish bo'yicha qo'llanma:\n\n"
+        "🔍 Kod orqali qidiruv - Anime kodini yuborib topish\n"
+        "🎬 Anime Qidirish - Botda mavjud bo'lgan animelarni qidirish\n"
+        "🎭 Drama Qidirish - Botda mavjud bo'lgan dramalarni qidirish\n"
+        "🖼 Rasm Orqali Anime Qidiruv - Nomini topa olmayotgan animeingizni rasm orqali topish\n"
+        "💸 Reklama - bot adminlari bilan reklama yoki homiylik yuzasidan aloqaga chiqish\n"
+        "📓 Ro'yxat - Botga joylangan Anime va Dramalar ro'yxati\n\n"
+        f"👨‍💻 Muallif: <a href='{AUTHOR_LINK}'>{AUTHOR_USERNAME}</a>\n"
+        f"🆘 Yordam: <a href='{SUPPORT_LINK}'>{SUPPORT_USERNAME}</a>\n\n"
+        f"🆔 Botdagi ID ingiz: {callback.from_user.id}"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_start")]])
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except:
+        await safe_send_message(callback.from_user.id, text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "advertisement")
+async def advertisement_start(callback: CallbackQuery):
+    await update_user_activity(callback.from_user.id)
+    text = (
+        "📌 Reklama va homiylik masalasida admin bilan bog'laning\n\n"
+        f"👨‍💻 Muallif: <a href='{AUTHOR_LINK}'>{AUTHOR_USERNAME}</a>"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_start")]])
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except:
+        await safe_send_message(callback.from_user.id, text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "list_all")
+async def list_all_start(callback: CallbackQuery):
+    await update_user_activity(callback.from_user.id)
+    
+    anime_list = cursor.execute("SELECT name, code, total_parts, status FROM media WHERE type = 'anime' ORDER BY name").fetchall()
+    drama_list = cursor.execute("SELECT name, code, total_parts, status FROM media WHERE type = 'drama' ORDER BY name").fetchall()
+    
+    if anime_list:
+        anime_text = "🎬 ANIMELAR RO'YXATI\n\n"
+        for i, (name, code, parts, status) in enumerate(anime_list, 1):
+            status_emoji = "🟢" if status == "ongoing" else "✅" if status == "completed" else "⏸"
+            anime_text += f"{i}. {name}\n   Kod: {code} | Qism: {parts} | {status_emoji}\n\n"
+        await send_text_file(callback.from_user.id, anime_text, "Animelar_Royxati.txt")
+    
+    if drama_list:
+        drama_text = "🎭 DRAMALAR RO'YXATI\n\n"
+        for i, (name, code, parts, status) in enumerate(drama_list, 1):
+            status_emoji = "🟢" if status == "ongoing" else "✅" if status == "completed" else "⏸"
+            drama_text += f"{i}. {name}\n   Kod: {code} | Qism: {parts} | {status_emoji}\n\n"
+        await send_text_file(callback.from_user.id, drama_text, "Dramalar_Royxati.txt")
+    
+    if not anime_list and not drama_list:
+        try:
+            await callback.message.edit_text("📭 Hozircha media mavjud emas!", parse_mode="HTML")
+        except:
+            await safe_send_message(callback.from_user.id, "📭 Hozircha media mavjud emas!", parse_mode="HTML")
+    
+    await callback.answer()
+
+# ================================================================
+# 15-MEDIA KO'RISH
+# ================================================================
+@dp.callback_query(lambda c: c.data.startswith("view_media_"))
+async def view_media(callback: CallbackQuery):
+    try:
+        parts = callback.data.split("_")
+        media_id = int(parts[2])
+        cursor.execute("SELECT name, type, description, image_url, genre, status, season, total_parts, views, code, voice, sponsor, quality FROM media WHERE id = ?", (media_id,))
+        media = cursor.fetchone()
+        if not media:
+            await callback.answer("Media topilmadi!")
+            return
+        name, media_type, desc, image, genre, status, season, total_parts, views, code, voice, sponsor, quality = media
+        cursor.execute("UPDATE media SET views = views + 1 WHERE id = ?", (media_id,))
+        conn.commit()
+        
+        status_text = {"ongoing": "🟢 Davom etmoqda", "completed": "✅ Tugallangan", "hiatus": "⏸ To'xtatilgan"}.get(status, "❓")
+        voice_text = voice if voice else f"{AUTHOR_USERNAME}"
+        sponsor_text = sponsor if sponsor else "AniCity Rasmiy"
+        
+        text = f"""
+┌─────────────────────────────────
+🎬 <b>{name}</b>
+└─────────────────────────────────
+
+┌─────────────────────────────────
+• Janr: {genre}
+• Sezon: {season}
+• Qism: {total_parts} ta
+• Holati: {status_text}
+• Ovoz: {voice_text}
+• Himoy: {sponsor_text}
+• Sifat: {quality}
+└─────────────────────────────────
+
+🔢 Kod: <code>{code}</code>
+📢 Kanal: {MAIN_CHANNEL}
+"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📺 Tomosha qilish", callback_data=f"watch_parts_{media_id}")],
+            [InlineKeyboardButton(text="🔙 Ortga", callback_data="back_to_start")]
+        ])
+        
+        if image and (image.startswith("http") or image.startswith("AgA")):
+            await safe_send_photo(callback.from_user.id, photo=image, caption=text, reply_markup=keyboard, parse_mode="HTML")
+        else:
+            await safe_send_message(callback.from_user.id, text, reply_markup=keyboard, parse_mode="HTML")
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"view_media xatosi: {e}")
+        await callback.answer("Xatolik yuz berdi!")
+
+# ================================================================
+# 16-QISMLARNI KO'RISH VA TOMOSHA QILISH
+# ================================================================
+@dp.callback_query(lambda c: c.data.startswith("watch_parts_") and not c.data.startswith("watch_parts_page_"))
+async def watch_parts(callback: CallbackQuery):
+    try:
+        media_id = int(callback.data.split("_")[2])
+        cursor.execute("SELECT name FROM media WHERE id = ?", (media_id,))
+        media_name = cursor.fetchone()[0]
+        cursor.execute("SELECT part_number FROM parts WHERE media_id = ? ORDER BY part_number", (media_id,))
+        parts = cursor.fetchall()
+        if not parts:
+            await callback.answer("Hozircha qismlar mavjud emas!")
+            return
+        text = f"📺 <b>{media_name}</b>\n\n📹 Qismlarni tanlang:"
+        try:
+            await callback.message.edit_text(text, reply_markup=watch_parts_keyboard(media_id), parse_mode="HTML")
+        except:
+            await safe_send_message(callback.from_user.id, text, reply_markup=watch_parts_keyboard(media_id), parse_mode="HTML")
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"watch_parts xatosi: {e}")
+        await callback.answer("Xatolik yuz berdi!")
+
+@dp.callback_query(lambda c: c.data.startswith("watch_part_"))
+async def watch_part(callback: CallbackQuery):
+    try:
+        parts = callback.data.split("_")
+        media_id = int(parts[2])
+        part_num = int(parts[3])
+        cursor.execute("SELECT file_id, caption FROM parts WHERE media_id = ? AND part_number = ?", (media_id, part_num))
+        part = cursor.fetchone()
+        if not part:
+            await callback.answer("Qism topilmadi!")
+            return
+        file_id, caption = part
+        cursor.execute("SELECT name FROM media WHERE id = ?", (media_id,))
+        media_name = cursor.fetchone()[0]
+        full_caption = f"🎬 {media_name}\n📹 {part_num}-qism\n\n{caption if caption else ''}"
+        await safe_send_video(callback.from_user.id, video=file_id, caption=full_caption, parse_mode="HTML")
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"watch_part xatosi: {e}")
+        await callback.answer("Xatolik yuz berdi!")
+
+@dp.callback_query(lambda c: c.data.startswith("watch_parts_page_"))
+async def watch_parts_page(callback: CallbackQuery):
+    try:
+        data = callback.data.split("_")
+        if len(data) >= 5:
+            media_id = int(data[3])
+            page = int(data[4])
+        else:
+            media_id = int(data[3])
+            page = 0
+        cursor.execute("SELECT name FROM media WHERE id = ?", (media_id,))
+        media_name = cursor.fetchone()[0]
+        text = f"📺 <b>{media_name}</b>\n\n📹 Qismlarni tanlang:"
+        try:
+            await callback.message.edit_text(text, reply_markup=watch_parts_keyboard(media_id, page), parse_mode="HTML")
+        except:
+            await safe_send_message(callback.from_user.id, text, reply_markup=watch_parts_keyboard(media_id, page), parse_mode="HTML")
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"watch_parts_page xatosi: {e}")
+        await callback.answer("Xatolik yuz berdi!")
+
+# ================================================================
+# 17-ADMIN PANEL
+# ================================================================
+@dp.callback_query(F.data == "admin_panel")
+async def admin_panel_callback(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Siz admin emassiz!", show_alert=True)
+        return
+    admin_image = get_admin_image()
+    admin_text = (
+        "🔐 <b>Admin Panel</b> 🔐\n\n"
+        f"👑 Adminlar: {cursor.execute('SELECT COUNT(*) FROM admins').fetchone()[0]}\n"
+        f"🎬 Media: {cursor.execute('SELECT COUNT(*) FROM media').fetchone()[0]}\n"
+        f"📹 Qismlar: {cursor.execute('SELECT COUNT(*) FROM parts').fetchone()[0]}\n"
+        f"👥 Foydalanuvchilar: {cursor.execute('SELECT COUNT(*) FROM users').fetchone()[0]}\n\n"
+        "⬇️ Quyidagi tugmalardan foydalaning:"
+    )
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    if admin_image:
+        await safe_send_photo(callback.from_user.id, photo=admin_image, caption=admin_text, reply_markup=admin_menu(), parse_mode="HTML")
+    else:
+        await safe_send_message(callback.from_user.id, admin_text, reply_markup=admin_menu(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(F.text == "🔙 Asosiy menyu")
+async def back_to_main_reply(message: Message):
+    start_image = get_start_image()
+    welcome_text = (
+        "🎬 <b>AniCity Rasmiy Bot</b> 🎬\n\n"
+        "✨ <b>Botimizga xush kelibsiz!</b> ✨\n\n"
+        "📚 <b>Bot imkoniyatlari:</b>\n"
+        "🔍 Kod orqali qidiruv\n"
+        "🎬 Anime va dramalarni nom bilan qidirish\n"
+        "🖼 Rasm orqali anime topish\n"
+        "📺 Barcha qismlarni tomosha qilish\n\n"
+        f"📢 <b>Asosiy kanal:</b> {MAIN_CHANNEL}\n"
+        f"👨‍💻 <b>Muallif:</b> <a href='{AUTHOR_LINK}'>{AUTHOR_USERNAME}</a>\n"
+        f"🆘 <b>Yordam:</b> <a href='{SUPPORT_LINK}'>{SUPPORT_USERNAME}</a>\n\n"
+        "⬇️ <b>Quyidagi tugmalardan birini tanlang:</b> ⬇️"
+    )
+    if start_image:
+        await safe_send_photo(message.chat.id, photo=start_image, caption=welcome_text, reply_markup=start_menu(), parse_mode="HTML")
+    else:
+        await safe_send_message(message.chat.id, welcome_text, reply_markup=start_menu(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "back_to_admin_reply")
+async def back_to_admin_reply(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Ruxsat yo'q!")
+        return
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    admin_image = get_admin_image()
+    admin_text = (
+        "🔐 <b>Admin Panel</b> 🔐\n\n"
+        f"👑 Adminlar: {cursor.execute('SELECT COUNT(*) FROM admins').fetchone()[0]}\n"
+        f"🎬 Media: {cursor.execute('SELECT COUNT(*) FROM media').fetchone()[0]}\n"
+        f"📹 Qismlar: {cursor.execute('SELECT COUNT(*) FROM parts').fetchone()[0]}\n"
+        f"👥 Foydalanuvchilar: {cursor.execute('SELECT COUNT(*) FROM users').fetchone()[0]}\n\n"
+        "⬇️ Quyidagi tugmalardan foydalaning:"
+    )
+    if admin_image:
+        await safe_send_photo(callback.from_user.id, photo=admin_image, caption=admin_text, reply_markup=admin_menu(), parse_mode="HTML")
+    else:
+        await safe_send_message(callback.from_user.id, admin_text, reply_markup=admin_menu(), parse_mode="HTML")
+    await callback.answer()
+
+# ================================================================
+# 18-MEDIA QO'SHISH
+# ================================================================
+@dp.message(F.text == "➕ Media Qo'shish")
+async def add_media_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎬 Anime", callback_data="media_type_anime")],
+        [InlineKeyboardButton(text="🎭 Drama", callback_data="media_type_drama")],
+        [InlineKeyboardButton(text="🔙 Bekor", callback_data="cancel_add_admin")]
+    ])
+    await message.answer("Media turini tanlang:", reply_markup=keyboard)
+    await state.set_state(AddMediaState.type)
+
+@dp.callback_query(AddMediaState.type, F.data.startswith("media_type_"))
+async def add_media_type(callback: CallbackQuery, state: FSMContext):
+    media_type = callback.data.split("_")[2]
+    await state.update_data(type=media_type)
+    try:
+        await callback.message.edit_text("Media nomini kiriting:")
+    except:
+        await safe_send_message(callback.from_user.id, "Media nomini kiriting:")
+    await state.set_state(AddMediaState.name)
+    await callback.answer()
+
+@dp.message(AddMediaState.name)
+async def add_media_name(message: Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await message.answer("Media kodini kiriting (faqat raqam, masalan: 1, 2, 3...):")
+    await state.set_state(AddMediaState.code)
+
+@dp.message(AddMediaState.code)
+async def add_media_code(message: Message, state: FSMContext):
+    try:
+        code = int(message.text.strip())
+        cursor.execute("SELECT id FROM media WHERE code = ?", (code,))
+        if cursor.fetchone():
+            await message.answer(f"❌ '{code}' kodi mavjud! Boshqa kod kiriting:")
+            return
+        await state.update_data(code=code)
+        await message.answer("Media tavsifini kiriting:")
+        await state.set_state(AddMediaState.description)
+    except ValueError:
+        await message.answer("❌ Faqat raqam kiriting!")
+
+@dp.message(AddMediaState.description)
+async def add_media_description(message: Message, state: FSMContext):
+    await state.update_data(description=message.text)
+    await message.answer("Rasm yuboring (jpg/png) yoki URL kiriting:")
+    await state.set_state(AddMediaState.image)
+
+@dp.message(AddMediaState.image, F.photo)
+async def add_media_image_photo(message: Message, state: FSMContext):
+    await state.update_data(image=message.photo[-1].file_id)
+    await message.answer("Janrlarini kiriting (vergul bilan):")
+    await state.set_state(AddMediaState.genre)
+
+@dp.message(AddMediaState.image, F.text)
+async def add_media_image_url(message: Message, state: FSMContext):
+    await state.update_data(image=message.text)
+    await message.answer("Janrlarini kiriting (vergul bilan):")
+    await state.set_state(AddMediaState.genre)
+
+@dp.message(AddMediaState.genre)
+async def add_media_genre(message: Message, state: FSMContext):
+    await state.update_data(genre=message.text)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Davom etmoqda", callback_data="add_status_ongoing")],
+        [InlineKeyboardButton(text="✅ Tugallangan", callback_data="add_status_completed")],
+        [InlineKeyboardButton(text="⏸ To'xtatilgan", callback_data="add_status_hiatus")]
+    ])
+    await message.answer("Media holatini tanlang:", reply_markup=keyboard)
+    await state.set_state(AddMediaState.status)
+
+@dp.callback_query(AddMediaState.status, F.data.startswith("add_status_"))
+async def add_media_status(callback: CallbackQuery, state: FSMContext):
+    status = callback.data.split("_")[2]
+    await state.update_data(status=status)
+    try:
+        await callback.message.edit_text("Sezon raqamini kiriting (masalan: 1):")
+    except:
+        await safe_send_message(callback.from_user.id, "Sezon raqamini kiriting (masalan: 1):")
+    await state.set_state(AddMediaState.season)
+    await callback.answer()
+
+@dp.message(AddMediaState.season)
+async def add_media_season(message: Message, state: FSMContext):
+    try:
+        season = int(message.text.strip())
+        await state.update_data(season=season)
+        await message.answer("Ovoz beruvchi(lar)ni kiriting (masalan: AniCity):")
+        await state.set_state(AddMediaState.voice)
+    except ValueError:
+        await message.answer("❌ Faqat raqam kiriting!")
+
+@dp.message(AddMediaState.voice)
+async def add_media_voice(message: Message, state: FSMContext):
+    await state.update_data(voice=message.text)
+    await message.answer("Himoy (homiy) ni kiriting (masalan: Nuqtacha):")
+    await state.set_state(AddMediaState.sponsor)
+
+@dp.message(AddMediaState.sponsor)
+async def add_media_sponsor(message: Message, state: FSMContext):
+    await state.update_data(sponsor=message.text)
+    await message.answer("Sifatni kiriting (masalan: 720p):")
+    await state.set_state(AddMediaState.quality)
+
+@dp.message(AddMediaState.quality)
+async def add_media_quality(message: Message, state: FSMContext):
+    await state.update_data(quality=message.text)
+    data = await state.get_data()
+    try:
+        cursor.execute("INSERT INTO media (code, type, name, description, image_url, genre, status, season, voice, sponsor, quality, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (data['code'], data['type'], data['name'], data['description'], data['image'], data['genre'], data['status'], data['season'], data['voice'], data['sponsor'], data['quality'], datetime.now().isoformat()))
+        conn.commit()
+        await message.answer(f"✅ <b>{data['name']}</b> qo'shildi!\n\n🔢 Kod: <code>{data['code']}</code>", parse_mode="HTML")
+    except sqlite3.IntegrityError:
+        await message.answer("❌ Bunday nomli media mavjud!")
+    await state.clear()
+
+# ================================================================
+# 19-QISM QO'SHISH
+# ================================================================
+@dp.message(F.text == "➕ Qism Qo'shish")
+async def add_part_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer("Qaysi animega qism qo'shmoqchisiz?\nAnime nomi yoki kodini kiriting:", parse_mode="HTML")
+    await state.set_state(AddPartState.select_media)
+
+@dp.message(AddPartState.select_media)
+async def add_part_select_media(message: Message, state: FSMContext):
+    query = message.text.strip()
+    try:
+        code = int(query)
+        cursor.execute("SELECT id, name FROM media WHERE code = ?", (code,))
+    except ValueError:
+        cursor.execute("SELECT id, name FROM media WHERE name LIKE ?", (f"%{query}%",))
+    
+    media = cursor.fetchone()
+    if not media:
+        await message.answer(f"❌ '{query}' bo'yicha media topilmadi! Qayta kiriting:")
+        return
+    
+    media_id, media_name = media
+    await state.update_data(media_id=media_id)
+    await message.answer(f"📺 <b>{media_name}</b> uchun qism raqamini kiriting:", parse_mode="HTML")
+    await state.set_state(AddPartState.part_number)
+
+@dp.message(AddPartState.part_number)
+async def add_part_number(message: Message, state: FSMContext):
+    try:
+        part_num = int(message.text)
+        await state.update_data(part_number=part_num)
+        data = await state.get_data()
+        cursor.execute("SELECT id FROM parts WHERE media_id = ? AND part_number = ?", (data['media_id'], part_num))
+        if cursor.fetchone():
+            await message.answer(f"⚠️ {part_num}-qism mavjud! Yangi raqam kiriting:")
+            return
+        await message.answer(f"🎬 {part_num}-qism videosini yuboring:")
+        await state.set_state(AddPartState.video)
+    except ValueError:
+        await message.answer("❌ Faqat raqam kiriting!")
+
+@dp.message(AddPartState.video, F.video)
+async def add_part_video(message: Message, state: FSMContext):
+    await state.update_data(video_id=message.video.file_id)
+    await message.answer("📝 Qism captioni kiriting:")
+    await state.set_state(AddPartState.caption)
+
+@dp.message(AddPartState.caption)
+async def add_part_caption(message: Message, state: FSMContext):
+    data = await state.update_data(caption=message.text)
+    cursor.execute("INSERT INTO parts (media_id, part_number, file_id, caption, created_at) VALUES (?, ?, ?, ?, ?)",
+                   (data['media_id'], data['part_number'], data['video_id'], data['caption'], datetime.now().isoformat()))
+    cursor.execute("UPDATE media SET total_parts = total_parts + 1 WHERE id = ?", (data['media_id'],))
+    conn.commit()
+    cursor.execute("SELECT name FROM media WHERE id = ?", (data['media_id'],))
+    media_name = cursor.fetchone()[0]
+    await message.answer(f"✅ <b>{media_name}</b> ning <b>{data['part_number']}-qismi</b> qo'shildi!", parse_mode="HTML")
+    await state.clear()
+
+# ================================================================
+# 20-KO'P QISM QO'SHISH
+# ================================================================
+@dp.message(F.text == "➕ Ko'p Qism Qo'shish")
+async def add_multiple_parts_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer("Qaysi animega qism qo'shmoqchisiz?\nAnime nomi yoki kodini kiriting:", parse_mode="HTML")
+    await state.set_state(AddMultiplePartsState.select_media)
+
+@dp.message(AddMultiplePartsState.select_media)
+async def add_multiple_parts_select_media(message: Message, state: FSMContext):
+    query = message.text.strip()
+    try:
+        code = int(query)
+        cursor.execute("SELECT id, name FROM media WHERE code = ?", (code,))
+    except ValueError:
+        cursor.execute("SELECT id, name FROM media WHERE name LIKE ?", (f"%{query}%",))
+    
+    media = cursor.fetchone()
+    if not media:
+        await message.answer(f"❌ '{query}' bo'yicha media topilmadi! Qayta kiriting:")
+        return
+    
+    media_id, media_name = media
+    await state.update_data(media_id=media_id)
+    await message.answer(
+        f"📺 <b>{media_name}</b> uchun qismlarni yuboring!\n\n"
+        "⚠️ QO'LLANMA:\n"
+        "Videolarni tagiga son qo'yib yuboring. Bot tartib bilan qabul qiladi.\n"
+        "Masalan: 1-qism videosiga captionga 1 yozing\n\n"
+        "Tugatish uchun /done",
+        parse_mode="HTML"
+    )
+    await state.update_data(videos=[])
+    await state.set_state(AddMultiplePartsState.videos)
+
+@dp.message(AddMultiplePartsState.videos, F.video)
+async def add_multiple_parts_video(message: Message, state: FSMContext):
+    data = await state.get_data()
+    videos = data.get('videos', [])
+    caption = message.caption or ""
+    match = re.search(r'^(\d+)', caption)
+    part_number = int(match.group(1)) if match else (max([v.get('part_number', 0) for v in videos]) + 1 if videos else 1)
+    videos.append({'part_number': part_number, 'file_id': message.video.file_id, 'caption': caption})
+    await state.update_data(videos=videos)
+    await message.answer(f"✅ {part_number}-qism qabul qilindi! ({len(videos)} ta qism saqlandi)\nTugatish uchun /done", parse_mode="HTML")
+
+@dp.message(AddMultiplePartsState.videos, Command("done"))
+async def add_multiple_parts_done(message: Message, state: FSMContext):
+    data = await state.get_data()
+    media_id = data['media_id']
+    videos = data.get('videos', [])
+    if not videos:
+        await message.answer("❌ Hech qanday video yuborilmagan!")
+        return
+    videos.sort(key=lambda x: x['part_number'])
+    saved = 0
+    for video in videos:
+        cursor.execute("SELECT id FROM parts WHERE media_id = ? AND part_number = ?", (media_id, video['part_number']))
+        if not cursor.fetchone():
+            cursor.execute("INSERT INTO parts (media_id, part_number, file_id, caption, created_at) VALUES (?, ?, ?, ?, ?)",
+                           (media_id, video['part_number'], video['file_id'], video['caption'], datetime.now().isoformat()))
+            saved += 1
+    if saved > 0:
+        cursor.execute("UPDATE media SET total_parts = total_parts + ? WHERE id = ?", (saved, media_id))
+        conn.commit()
+    await message.answer(f"✅ {saved} ta qism qo'shildi!", parse_mode="HTML")
+    await state.clear()
+
+# ================================================================
+# 21-MEDIA TAHRIRLASH
+# ================================================================
+@dp.message(F.text == "✏️ Media Tahrirlash")
+async def edit_media_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer("Qaysi animeni tahrirlamoqchisiz?\nAnime nomi yoki kodini kiriting:", parse_mode="HTML")
+    await state.set_state(EditMediaState.select)
+
+@dp.message(EditMediaState.select)
+async def edit_media_select(message: Message, state: FSMContext):
+    query = message.text.strip()
+    try:
+        code = int(query)
+        cursor.execute("SELECT id, name FROM media WHERE code = ?", (code,))
+    except ValueError:
+        cursor.execute("SELECT id, name FROM media WHERE name LIKE ?", (f"%{query}%",))
+    
+    media = cursor.fetchone()
+    if not media:
+        await message.answer(f"❌ '{query}' bo'yicha media topilmadi! Qayta kiriting:")
+        return
+    
+    media_id, media_name = media
+    await state.update_data(media_id=media_id)
+    await message.answer(f"✏️ <b>{media_name}</b> tahrirlash\n\nQaysi maydonni tahrirlamoqchisiz?", reply_markup=edit_media_fields_keyboard(media_id), parse_mode="HTML")
+    await state.set_state(EditMediaState.field)
+
+@dp.callback_query(F.data.startswith("edit_media_"))
+async def edit_media_field(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    media_id = int(parts[2])
+    field = parts[3]
+    await state.update_data(media_id=media_id, field=field)
+    
+    field_names = {
+        "name": "yangi nomini",
+        "code": "yangi kodni (faqat raqam)",
+        "description": "yangi tavsifini",
+        "image": "yangi rasmni",
+        "genre": "yangi janrlarini",
+        "status": "yangi holatini",
+        "season": "yangi sezon raqamini",
+        "voice": "yangi ovoz(lar)ni",
+        "sponsor": "yangi himoy (homiy) ni",
+        "quality": "yangi sifatni"
+    }
+    
+    if field == "status":
+        try:
+            await callback.message.edit_text("Yangi holatni tanlang:", reply_markup=status_keyboard(media_id))
+        except:
+            await safe_send_message(callback.from_user.id, "Yangi holatni tanlang:", reply_markup=status_keyboard(media_id))
+        await callback.answer()
+        return
+    
+    try:
+        await callback.message.edit_text(f"✏️ {field_names.get(field, 'yangi qiymatini')} kiriting:")
+    except:
+        await safe_send_message(callback.from_user.id, f"✏️ {field_names.get(field, 'yangi qiymatini')} kiriting:")
+    await state.set_state(EditMediaState.value)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("set_status_"))
+async def set_media_status(callback: CallbackQuery, state: FSMContext):
+    _, media_id, status = callback.data.split("_")
+    cursor.execute("UPDATE media SET status = ? WHERE id = ?", (status, int(media_id)))
+    conn.commit()
+    try:
+        await callback.message.edit_text(f"✅ Holat '{status}' ga o'zgartirildi!")
+    except:
+        await safe_send_message(callback.from_user.id, f"✅ Holat '{status}' ga o'zgartirildi!")
+    await state.clear()
+    await callback.answer()
+
+@dp.message(EditMediaState.value, F.text)
+async def edit_media_value(message: Message, state: FSMContext):
+    data = await state.get_data()
+    media_id = data['media_id']
+    field = data['field']
+    value = message.text
+    
+    if field == "name":
+        try:
+            cursor.execute("UPDATE media SET name = ? WHERE id = ?", (value, media_id))
+            conn.commit()
+            await message.answer(f"✅ Nomi '{value}' ga o'zgartirildi!")
+        except:
+            await message.answer("❌ Bunday nomli media mavjud!")
+    elif field == "code":
+        try:
+            code = int(value)
+            cursor.execute("SELECT id FROM media WHERE code = ? AND id != ?", (code, media_id))
+            if cursor.fetchone():
+                await message.answer("❌ Bunday kod mavjud!")
+            else:
+                cursor.execute("UPDATE media SET code = ? WHERE id = ?", (code, media_id))
+                conn.commit()
+                await message.answer(f"✅ Kod '{code}' ga o'zgartirildi!")
+        except ValueError:
+            await message.answer("❌ Faqat raqam kiriting!")
+    elif field == "description":
+        cursor.execute("UPDATE media SET description = ? WHERE id = ?", (value, media_id))
+        conn.commit()
+        await message.answer("✅ Tavsif o'zgartirildi!")
+    elif field == "genre":
+        cursor.execute("UPDATE media SET genre = ? WHERE id = ?", (value, media_id))
+        conn.commit()
+        await message.answer("✅ Janr o'zgartirildi!")
+    elif field == "season":
+        try:
+            season = int(value)
+            cursor.execute("UPDATE media SET season = ? WHERE id = ?", (season, media_id))
+            conn.commit()
+            await message.answer(f"✅ Sezon {season} ga o'zgartirildi!")
+        except ValueError:
+            await message.answer("❌ Faqat raqam kiriting!")
+    elif field == "voice":
+        cursor.execute("UPDATE media SET voice = ? WHERE id = ?", (value, media_id))
+        conn.commit()
+        await message.answer("✅ Ovoz o'zgartirildi!")
+    elif field == "sponsor":
+        cursor.execute("UPDATE media SET sponsor = ? WHERE id = ?", (value, media_id))
+        conn.commit()
+        await message.answer("✅ Himoy o'zgartirildi!")
+    elif field == "quality":
+        cursor.execute("UPDATE media SET quality = ? WHERE id = ?", (value, media_id))
+        conn.commit()
+        await message.answer("✅ Sifat o'zgartirildi!")
+    
+    await state.clear()
+
+@dp.message(EditMediaState.value, F.photo)
+async def edit_media_image_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    cursor.execute("UPDATE media SET image_url = ? WHERE id = ?", (message.photo[-1].file_id, data['media_id']))
+    conn.commit()
+    await message.answer("✅ Rasm o'zgartirildi!")
+    await state.clear()
+
+# ================================================================
+# 22-QISMNI TAHRIRLASH
+# ================================================================
+@dp.message(F.text == "✏️ Qismni Tahrirlash")
+async def edit_part_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer("Qaysi animega tegishli qismni tahrirlamoqchisiz?\nAnime nomi yoki kodini kiriting:", parse_mode="HTML")
+    await state.set_state(EditPartState.select_media)
+
+@dp.message(EditPartState.select_media)
+async def edit_part_select_media(message: Message, state: FSMContext):
+    query = message.text.strip()
+    try:
+        code = int(query)
+        cursor.execute("SELECT id, name FROM media WHERE code = ?", (code,))
+    except ValueError:
+        cursor.execute("SELECT id, name FROM media WHERE name LIKE ?", (f"%{query}%",))
+    
+    media = cursor.fetchone()
+    if not media:
+        await message.answer(f"❌ '{query}' bo'yicha media topilmadi! Qayta kiriting:")
+        return
+    
+    media_id, media_name = media
+    await state.update_data(media_id=media_id)
+    await message.answer(f"📺 <b>{media_name}</b>\n\nQism tanlang:", reply_markup=parts_list_keyboard(media_id), parse_mode="HTML")
+    await state.set_state(EditPartState.select_part)
+
+@dp.callback_query(EditPartState.select_part, F.data.startswith("select_part_"))
+async def edit_part_select_part(callback: CallbackQuery, state: FSMContext):
+    part_id = int(callback.data.split("_")[2])
+    await state.update_data(part_id=part_id)
+    cursor.execute("SELECT media_id, part_number FROM parts WHERE id = ?", (part_id,))
+    media_id, part_num = cursor.fetchone()
+    try:
+        await callback.message.edit_text(f"✏️ {part_num}-qismni tahrirlash\n\nQaysi maydonni tahrirlamoqchisiz?", reply_markup=edit_part_fields_keyboard(part_id, media_id), parse_mode="HTML")
+    except:
+        await safe_send_message(callback.from_user.id, f"✏️ {part_num}-qismni tahrirlash\n\nQaysi maydonni tahrirlamoqchisiz?", reply_markup=edit_part_fields_keyboard(part_id, media_id), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("edit_part_"))
+async def edit_part_field(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    part_id = int(parts[2])
+    field = parts[3]
+    await state.update_data(part_id=part_id, field=field)
+    field_names = {"video": "yangi videoni", "caption": "yangi captionni", "number": "yangi qism raqamini"}
+    try:
+        await callback.message.edit_text(f"✏️ {field_names.get(field, 'yangi qiymatini')} kiriting:")
+    except:
+        await safe_send_message(callback.from_user.id, f"✏️ {field_names.get(field, 'yangi qiymatini')} kiriting:")
+    await state.set_state(EditPartState.value)
+    await callback.answer()
+
+@dp.message(EditPartState.value, F.video)
+async def edit_part_video(message: Message, state: FSMContext):
+    data = await state.get_data()
+    cursor.execute("UPDATE parts SET file_id = ? WHERE id = ?", (message.video.file_id, data['part_id']))
+    conn.commit()
+    await message.answer("✅ Video o'zgartirildi!")
+    await state.clear()
+
+@dp.message(EditPartState.value, F.text)
+async def edit_part_value(message: Message, state: FSMContext):
+    data = await state.get_data()
+    part_id = data['part_id']
+    field = data['field']
+    value = message.text
+    if field == "caption":
+        cursor.execute("UPDATE parts SET caption = ? WHERE id = ?", (value, part_id))
+        conn.commit()
+        await message.answer("✅ Caption o'zgartirildi!")
+    elif field == "number":
+        try:
+            part_num = int(value)
+            cursor.execute("SELECT media_id FROM parts WHERE id = ?", (part_id,))
+            media_id = cursor.fetchone()[0]
+            cursor.execute("SELECT id FROM parts WHERE media_id = ? AND part_number = ? AND id != ?", (media_id, part_num, part_id))
+            if cursor.fetchone():
+                await message.answer(f"⚠️ {part_num}-qism mavjud!")
+            else:
+                cursor.execute("UPDATE parts SET part_number = ? WHERE id = ?", (part_num, part_id))
+                conn.commit()
+                await message.answer(f"✅ Qism raqami {part_num} ga o'zgartirildi!")
+        except ValueError:
+            await message.answer("❌ Faqat raqam kiriting!")
+    await state.clear()
+
+# ================================================================
+# 23-STATISTIKA
+# ================================================================
+@dp.message(F.text == "📊 Statistika")
+async def show_stats(message: Message):
+    if not is_admin(message.from_user.id): return
+    users = cursor.execute("SELECT COUNT(*) FROM users WHERE is_blocked = 0").fetchone()[0]
+    media = cursor.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+    parts = cursor.execute("SELECT COUNT(*) FROM parts").fetchone()[0]
+    views = cursor.execute("SELECT SUM(views) FROM media").fetchone()[0] or 0
+    admins = cursor.execute("SELECT COUNT(*) FROM admins").fetchone()[0]
+    await message.answer(f"📊 <b>Statistika</b>\n\n👥 Foydalanuvchilar: {users}\n🎬 Media: {media}\n📹 Qismlar: {parts}\n👁️ Ko'rishlar: {views}\n👑 Adminlar: {admins}", parse_mode="HTML")
+
+# ================================================================
+# 24-XABAR YUBORISH
+# ================================================================
+@dp.message(F.text == "📢 Xabar Yuborish")
+async def broadcast_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer("📢 Xabar yuborish\n\nXabaringizni kiriting:", parse_mode="HTML")
+    await state.set_state(BroadcastState.message)
+
+@dp.message(BroadcastState.message)
+async def broadcast_send(message: Message, state: FSMContext):
+    users = cursor.execute("SELECT id FROM users WHERE is_blocked = 0").fetchall()
+    sent = 0
+    for user in users:
+        try:
+            if message.photo:
+                await bot.send_photo(user[0], message.photo[-1].file_id, caption=message.caption, parse_mode="HTML")
+            elif message.video:
+                await bot.send_video(user[0], message.video.file_id, caption=message.caption, parse_mode="HTML")
+            else:
+                await bot.send_message(user[0], message.text, parse_mode="HTML")
+            sent += 1
+        except:
+            pass
+    await message.answer(f"✅ {sent}/{len(users)} ta foydalanuvchiga yuborildi!")
+    await state.clear()
+
+# ================================================================
+# 25-MAJBURIY KANAL BOSHQARUVI (ADMIN PANEL)
+# ================================================================
+@dp.message(F.text == "🔗 Majburiy A'zo")
+async def forced_subscribe_menu(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer("🔗 Majburiy a'zolik boshqaruvi:", reply_markup=forced_channel_buttons(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "forced_add")
+async def forced_add_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!")
+        return
+    await state.set_state(ForcedChannelState.waiting_for_channel)
+    try:
+        await callback.message.edit_text("➕ Kanal username yoki linkini yuboring:\nMasalan: @kanal yoki https://t.me/kanal")
+    except:
+        await safe_send_message(callback.from_user.id, "➕ Kanal username yoki linkini yuboring:\nMasalan: @kanal yoki https://t.me/kanal")
+    await callback.answer()
+
+@dp.message(ForcedChannelState.waiting_for_channel)
+async def forced_add_channel(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    
+    channel_input = message.text.strip()
+    if channel_input.startswith("https://t.me/"):
+        parts = channel_input.split("/")
+        username = parts[-1].split("?")[0]
+        channel = f"@{username}"
+    elif channel_input.startswith("@"):
+        channel = channel_input
+    else:
+        channel = f"@{channel_input}"
+    
+    clean = channel.replace("@", "")
+    try:
+        await bot.get_chat(f"@{clean}")
+        cursor.execute("INSERT INTO forced_channels (channel_username, is_active) VALUES (?, ?)", (channel, 1))
+        conn.commit()
+        await message.answer(f"✅ {channel} majburiy a'zolik ro'yxatiga qo'shildi!")
+    except Exception as e:
+        await message.answer(f"❌ Xatolik: Kanal topilmadi yoki bot a'zo emas.\n{e}")
+    await state.clear()
+
+@dp.callback_query(F.data == "forced_remove")
+async def forced_remove_list(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!")
+        return
+    cursor.execute("SELECT id, channel_username FROM forced_channels ORDER BY channel_username")
+    channels = cursor.fetchall()
+    if not channels:
+        try:
+            await callback.message.edit_text("📭 Hozircha majburiy kanal yo'q.")
+        except:
+            await safe_send_message(callback.from_user.id, "📭 Hozircha majburiy kanal yo'q.")
+        await callback.answer()
+        return
+    try:
+        await callback.message.edit_text("❌ O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=forced_channel_list_keyboard())
+    except:
+        await safe_send_message(callback.from_user.id, "❌ O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=forced_channel_list_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("forced_del_"))
+async def forced_remove_channel(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!")
+        return
+    ch_id = int(callback.data.split("_")[2])
+    cursor.execute("DELETE FROM forced_channels WHERE id = ?", (ch_id,))
+    conn.commit()
+    try:
+        await callback.message.edit_text("✅ Kanal o'chirildi!")
+    except:
+        await safe_send_message(callback.from_user.id, "✅ Kanal o'chirildi!")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("forced_page_"))
+async def forced_page_callback(callback: CallbackQuery):
+    page = int(callback.data.split("_")[2])
+    try:
+        await callback.message.edit_text("❌ O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=forced_channel_list_keyboard(page))
+    except:
+        await safe_send_message(callback.from_user.id, "❌ O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=forced_channel_list_keyboard(page))
+    await callback.answer()
+
+@dp.callback_query(F.data == "forced_list")
+async def forced_list(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!")
+        return
+    cursor.execute("SELECT channel_username, is_active FROM forced_channels ORDER BY channel_username")
+    channels = cursor.fetchall()
+    if not channels:
+        text = "📭 Majburiy kanallar ro'yxati bo'sh."
+    else:
+        text = "📋 Majburiy kanallar:\n\n"
+        for ch_username, active in channels:
+            status = "✅ aktiv" if active else "❌ noaktiv"
+            text += f"• {ch_username} ({status})\n"
+    try:
+        await callback.message.edit_text(text)
+    except:
+        await safe_send_message(callback.from_user.id, text)
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_forced_menu")
+async def back_to_forced_menu(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    try:
+        await callback.message.edit_text("🔗 Majburiy a'zolik boshqaruvi:", reply_markup=forced_channel_buttons(), parse_mode="HTML")
+    except:
+        await safe_send_message(callback.from_user.id, "🔗 Majburiy a'zolik boshqaruvi:", reply_markup=forced_channel_buttons(), parse_mode="HTML")
+    await callback.answer()
+
+# ================================================================
+# 26-ADMIN QO'SHISH/CHIQARISH
+# ================================================================
+@dp.message(F.text == "👑 Admin Qo'shish")
+async def admin_manage(message: Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await message.answer("❌ Faqat ownerlar admin qo'shishi mumkin!")
+        return
+    await message.answer("Admin boshqaruvi:", reply_markup=admin_manage_buttons(), parse_mode="HTML")
+    await state.set_state(AdminManageState.action)
+
+@dp.callback_query(AdminManageState.action, F.data == "admin_add")
+async def admin_add_request(callback: CallbackQuery, state: FSMContext):
+    if not is_owner(callback.from_user.id):
+        await callback.answer("❌ Faqat ownerlar admin qo'shishi mumkin!", show_alert=True)
+        return
+    await state.update_data(action="add")
+    try:
+        await callback.message.edit_text("➕ Yangi admin ID sini kiriting:", parse_mode="HTML")
+    except:
+        await safe_send_message(callback.from_user.id, "➕ Yangi admin ID sini kiriting:", parse_mode="HTML")
+    await state.set_state(AdminManageState.user_id)
+    await callback.answer()
+
+@dp.callback_query(AdminManageState.action, F.data == "admin_remove")
+async def admin_remove_request(callback: CallbackQuery, state: FSMContext):
+    if not is_owner(callback.from_user.id):
+        await callback.answer("❌ Faqat ownerlar admin chiqarishi mumkin!", show_alert=True)
+        return
+    await state.update_data(action="remove")
+    admins = cursor.execute("SELECT user_id FROM admins WHERE user_id NOT IN (?, ?)", ADMINS[0], ADMINS[1] if len(ADMINS) > 1 else 0).fetchall()
+    if admins:
+        text = "❌ Admin chiqarish:\n\nMavjud adminlar:\n" + "\n".join([f"• {a[0]}" for a in admins]) + "\n\nO'chirmoqchi bo'lgan ID ni kiriting:"
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML")
+        except:
+            await safe_send_message(callback.from_user.id, text, parse_mode="HTML")
+    else:
+        try:
+            await callback.message.edit_text("❌ O'chirish mumkin bo'lgan admin yo'q!")
+        except:
+            await safe_send_message(callback.from_user.id, "❌ O'chirish mumkin bo'lgan admin yo'q!")
+        await state.clear()
+    await state.set_state(AdminManageState.user_id)
+    await callback.answer()
+
+@dp.message(AdminManageState.user_id)
+async def admin_manage_user_id(message: Message, state: FSMContext):
+    try:
+        user_id = int(message.text)
+        data = await state.get_data()
+        if data['action'] == "add":
+            cursor.execute("INSERT OR IGNORE INTO admins (user_id, added_by, added_at) VALUES (?, ?, ?)", (user_id, message.from_user.id, datetime.now().isoformat()))
+            conn.commit()
+            await message.answer(f"✅ {user_id} admin qo'shildi!" if cursor.rowcount > 0 else f"⚠️ {user_id} allaqachon admin!")
+            try:
+                await bot.send_message(user_id, "🎉 Siz admin etib tayinlandingiz!\n/admin orqali panelga kiring.")
+            except:
+                pass
+        else:
+            if user_id in ADMINS:
+                await message.answer("❌ Ownerlarni o'chirib bo'lmaydi!")
+            else:
+                cursor.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+                conn.commit()
+                await message.answer(f"✅ {user_id} adminlikdan chiqarildi!" if cursor.rowcount > 0 else f"⚠️ {user_id} admin emas!")
+    except ValueError:
+        await message.answer("❌ Faqat raqam kiriting!")
+    await state.clear()
+
+# ================================================================
+# 27-POST QILISH
+# ================================================================
+@dp.message(F.text == "📨 Post Qilish")
+async def post_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer("📨 Post qilish\n\nPost qilmoqchi bo'lgan media nomi yoki kodini kiriting:", parse_mode="HTML")
+    await state.set_state(PostState.media_id)
+
+@dp.message(PostState.media_id)
+async def post_media_id(message: Message, state: FSMContext):
+    query = message.text.strip()
+    try:
+        code = int(query)
+        cursor.execute("SELECT id, name, code, description, total_parts, status, season, genre, voice, sponsor, quality, image_url FROM media WHERE code = ?", (code,))
+    except ValueError:
+        cursor.execute("SELECT id, name, code, description, total_parts, status, season, genre, voice, sponsor, quality, image_url FROM media WHERE name LIKE ?", (f"%{query}%",))
+    media = cursor.fetchone()
+    if not media:
+        await message.answer(f"❌ '{query}' bo'yicha media topilmadi!")
+        return
+    media_id, name, code, desc, total_parts, status, season, genre, voice, sponsor, quality, image = media
+    await state.update_data(media_id=media_id)
+    
+    status_text = {"ongoing": "🟢 Davom etmoqda", "completed": "✅ Tugallangan", "hiatus": "⏸ To'xtatilgan"}.get(status, "Noma'lum")
+    voice_text = voice if voice else f"{AUTHOR_USERNAME}"
+    sponsor_text = sponsor if sponsor else "AniCity Rasmiy"
+    
+    info_text = (
+        f"📨 <b>Post ma'lumotlari</b>\n\n"
+        f"🎬 Nomi: {name}\n"
+        f"🔢 Kod: {code}\n"
+        f"🎭 Janr: {genre}\n"
+        f"🎬 Sezon: {season}\n"
+        f"📹 Qismlar: {total_parts} ta\n"
+        f"📊 Holat: {status_text}\n"
+        f"🎙 Ovoz: {voice_text}\n"
+        f"🤝 Himoy: {sponsor_text}\n"
+        f"📀 Sifat: {quality}\n"
+        f"📝 Tavsif: {desc[:100]}...\n\n"
+        "Endi post qilmoqchi bo'lgan kanal linkini yuboring:\n"
+        "Masalan: @kanal yoki https://t.me/kanal"
+    )
+    await message.answer(info_text, parse_mode="HTML")
+    await state.set_state(PostState.channel)
+
+@dp.message(PostState.channel)
+async def post_channel(message: Message, state: FSMContext):
+    channel_input = message.text.strip()
+    if channel_input.startswith("https://t.me/"):
+        parts = channel_input.split("/")
+        username = parts[-1].split("?")[0]
+        channel = f"@{username}"
+    elif channel_input.startswith("@"):
+        channel = channel_input
+    else:
+        channel = f"@{channel_input}"
+    
+    await state.update_data(channel=channel)
+    
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Siz admin emassiz!")
+        await state.clear()
+        return
+    
+    data = await state.get_data()
+    media_id = data['media_id']
+    cursor.execute("SELECT name, code, total_parts, status, season, genre, voice, sponsor, quality, image_url FROM media WHERE id = ?", (media_id,))
+    name, code, total_parts, status, season, genre, voice, sponsor, quality, image = cursor.fetchone()
+    
+    status_text = {"ongoing": "🟢 Davom etmoqda", "completed": "✅ Tugallangan", "hiatus": "⏸ To'xtatilgan"}.get(status, "Noma'lum")
+    voice_text = voice if voice else f"{AUTHOR_USERNAME}"
+    sponsor_text = sponsor if sponsor else "AniCity Rasmiy"
+    
+    post_text = f"""
+┌─────────────────────────────────
+🎬 <b>{name}</b>
+└─────────────────────────────────
+
+┌─────────────────────────────────
+• Janr: {genre}
+• Sezon: {season}
+• Qism: {total_parts}
+• Holati: {status_text}
+• Ovoz: {voice_text}
+• Himoy: {sponsor_text}
+• Sifat: {quality}
+└─────────────────────────────────
+
+🔢 Kod: <code>{code}</code>
+📢 Kanal: @AniCity_Rasmiy
+"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Tasdiqlash", callback_data="confirm_post")],
+        [InlineKeyboardButton(text="❌ Rad etish", callback_data="cancel_post")]
+    ])
+    
+    await message.answer(post_text, reply_markup=keyboard, parse_mode="HTML")
+    await state.set_state(PostState.confirm)
+
+@dp.callback_query(PostState.confirm, F.data == "confirm_post")
+async def post_confirm(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    media_id = data['media_id']
+    channel = data['channel']
+    cursor.execute("SELECT name, code, total_parts, status, season, genre, voice, sponsor, quality, image_url FROM media WHERE id = ?", (media_id,))
+    name, code, total_parts, status, season, genre, voice, sponsor, quality, image = cursor.fetchone()
+    
+    status_text = {"ongoing": "🟢 Davom etmoqda", "completed": "✅ Tugallangan", "hiatus": "⏸ To'xtatilgan"}.get(status, "Noma'lum")
+    voice_text = voice if voice else f"{AUTHOR_USERNAME}"
+    sponsor_text = sponsor if sponsor else "AniCity Rasmiy"
+    
+    post_text = f"""
+┌─────────────────────────────────
+🎬 <b>{name}</b>
+└─────────────────────────────────
+
+┌─────────────────────────────────
+• Janr: {genre}
+• Sezon: {season}
+• Qism: {total_parts}
+• Holati: {status_text}
+• Ovoz: {voice_text}
+• Himoy: {sponsor_text}
+• Sifat: {quality}
+└─────────────────────────────────
+
+🔢 Kod: <code>{code}</code>
+📢 Kanal: @AniCity_Rasmiy
+"""
+    
+    bot_info = await bot.get_me()
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="+ Tomosha qilish", url=f"https://t.me/{bot_info.username}?start=code_{code}")]
+    ])
+    
+    try:
+        if image:
+            await bot.send_photo(chat_id=channel, photo=image, caption=post_text, reply_markup=keyboard, parse_mode="HTML")
+        else:
+            await bot.send_message(chat_id=channel, text=post_text, reply_markup=keyboard, parse_mode="HTML")
+        try:
+            await callback.message.edit_text(f"✅ Post muvaffaqiyatli yuborildi!\n\nKanal: {channel}")
+        except:
+            await safe_send_message(callback.from_user.id, f"✅ Post muvaffaqiyatli yuborildi!\n\nKanal: {channel}")
+    except Exception as e:
+        try:
+            await callback.message.edit_text(f"❌ Xatolik: {e}")
+        except:
+            await safe_send_message(callback.from_user.id, f"❌ Xatolik: {e}")
+    await state.clear()
+    await callback.answer()
+
+@dp.callback_query(PostState.confirm, F.data == "cancel_post")
+async def post_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    try:
+        await callback.message.answer("❌ Post bekor qilindi.")
+    except:
+        pass
+    await callback.answer()
+
+# ================================================================
+# 28-QISMNI POST QILISH
+# ================================================================
+@dp.message(F.text == "🎬 Qismni Post Qilish")
+async def part_post_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer("🎬 Qismni post qilish\n\nPost qilmoqchi bo'lgan media nomi yoki kodini kiriting:", parse_mode="HTML")
+    await state.set_state(PartPostState.media_id)
+
+@dp.message(PartPostState.media_id)
+async def part_post_media_id(message: Message, state: FSMContext):
+    query = message.text.strip()
+    try:
+        code = int(query)
+        cursor.execute("SELECT id, name, code, image_url FROM media WHERE code = ?", (code,))
+    except ValueError:
+        cursor.execute("SELECT id, name, code, image_url FROM media WHERE name LIKE ?", (f"%{query}%",))
+    media = cursor.fetchone()
+    if not media:
+        await message.answer(f"❌ '{query}' bo'yicha media topilmadi!")
+        return
+    media_id, name, code, image = media
+    await state.update_data(media_id=media_id)
+    await state.update_data(media_image=image)
+    await state.update_data(media_name=name)
+    await state.update_data(media_code=code)
+    await message.answer(f"📺 <b>{name}</b> (Kod: {code})\n\nQaysi qismni post qilmoqchisiz?", reply_markup=parts_list_keyboard(media_id), parse_mode="HTML")
+    await state.set_state(PartPostState.part_id)
+
+@dp.callback_query(PartPostState.part_id, F.data.startswith("select_part_"))
+async def part_post_select_part(callback: CallbackQuery, state: FSMContext):
+    part_id = int(callback.data.split("_")[2])
+    await state.update_data(part_id=part_id)
+    cursor.execute("SELECT p.part_number, m.name, m.code, m.image_url, m.total_parts, m.status, m.season, m.genre, m.voice, m.sponsor, m.quality FROM parts p JOIN media m ON p.media_id = m.id WHERE p.id = ?", (part_id,))
+    part_num, media_name, code, image, total_parts, status, season, genre, voice, sponsor, quality = cursor.fetchone()
+    
+    status_text = {"ongoing": "🟢 Davom etmoqda", "completed": "✅ Tugallangan", "hiatus": "⏸ To'xtatilgan"}.get(status, "Noma'lum")
+    voice_text = voice if voice else f"{AUTHOR_USERNAME}"
+    sponsor_text = sponsor if sponsor else "AniCity Rasmiy"
+    
+    try:
+        await callback.message.edit_text(
+            f"✅ <b>{media_name}</b> - {part_num}-qism topildi!\n\n"
+            f"🎭 Kod: {code}\n"
+            f"🎬 Sezon: {season}\n"
+            f"📹 Qism: {part_num}/{total_parts}\n"
+            f"📊 Holat: {status_text}\n"
+            f"🎭 Janr: {genre}\n"
+            f"🎙 Ovoz: {voice_text}\n"
+            f"🤝 Himoy: {sponsor_text}\n"
+            f"📀 Sifat: {quality}\n\n"
+            "Endi post qilmoqchi bo'lgan kanal linkini yuboring:\n"
+            "Masalan: @kanal yoki https://t.me/kanal",
+            parse_mode="HTML"
+        )
+    except:
+        await safe_send_message(callback.from_user.id,
+            f"✅ <b>{media_name}</b> - {part_num}-qism topildi!\n\n"
+            f"🎭 Kod: {code}\n"
+            f"🎬 Sezon: {season}\n"
+            f"📹 Qism: {part_num}/{total_parts}\n"
+            f"📊 Holat: {status_text}\n"
+            f"🎭 Janr: {genre}\n"
+            f"🎙 Ovoz: {voice_text}\n"
+            f"🤝 Himoy: {sponsor_text}\n"
+            f"📀 Sifat: {quality}\n\n"
+            "Endi post qilmoqchi bo'lgan kanal linkini yuboring:\n"
+            "Masalan: @kanal yoki https://t.me/kanal",
+            parse_mode="HTML"
+        )
+    await state.update_data(part_number=part_num)
+    await state.update_data(media_image=image)
+    await state.update_data(media_name=media_name)
+    await state.update_data(media_code=code)
+    await state.set_state(PartPostState.channel)
+    await callback.answer()
+
+@dp.message(PartPostState.channel)
+async def part_post_channel(message: Message, state: FSMContext):
+    channel_input = message.text.strip()
+    if channel_input.startswith("https://t.me/"):
+        parts = channel_input.split("/")
+        username = parts[-1].split("?")[0]
+        channel = f"@{username}"
+    elif channel_input.startswith("@"):
+        channel = channel_input
+    else:
+        channel = f"@{channel_input}"
+    
+    await state.update_data(channel=channel)
+    
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Siz admin emassiz!")
+        await state.clear()
+        return
+    
+    data = await state.get_data()
+    part_num = data.get('part_number')
+    media_name = data.get('media_name')
+    media_code = data.get('media_code')
+    media_image = data.get('media_image')
+    
+    post_text = f"""
+┌─────────────────────────────────
+🎬 <b>{media_name}</b>
+└─────────────────────────────────
+
+┌─────────────────────────────────
+• {part_num}-qism
+• Anime KODI: {media_code}
+└─────────────────────────────────
+
+📢 Kanal: @AniCity_Rasmiy
+"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Tasdiqlash", callback_data="confirm_part_post")],
+        [InlineKeyboardButton(text="❌ Rad etish", callback_data="cancel_post")]
+    ])
+    
+    await message.answer(post_text, reply_markup=keyboard, parse_mode="HTML")
+    await state.set_state(PartPostState.confirm)
+
+@dp.callback_query(PartPostState.confirm, F.data == "confirm_part_post")
+async def part_post_confirm(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    part_num = data.get('part_number')
+    media_name = data.get('media_name')
+    media_code = data.get('media_code')
+    media_image = data.get('media_image')
+    channel = data.get('channel')
+    
+    bot_info = await bot.get_me()
+    
+    post_text = f"""
+┌─────────────────────────────────
+🎬 <b>{media_name}</b>
+└─────────────────────────────────
+
+┌─────────────────────────────────
+• {part_num}-qism
+• Anime KODI: {media_code}
+└─────────────────────────────────
+
+📢 Kanal: @AniCity_Rasmiy
+"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"+ {part_num}-qismni tomosha qilish", url=f"https://t.me/{bot_info.username}?start=code_{media_code}&part={part_num}")]
+    ])
+    
+    try:
+        if media_image:
+            await bot.send_photo(chat_id=channel, photo=media_image, caption=post_text, reply_markup=keyboard, parse_mode="HTML")
+        else:
+            await bot.send_message(chat_id=channel, text=post_text, reply_markup=keyboard, parse_mode="HTML")
+        try:
+            await callback.message.edit_text(f"✅ Qism post qilindi!\n\nKanal: {channel}")
+        except:
+            await safe_send_message(callback.from_user.id, f"✅ Qism post qilindi!\n\nKanal: {channel}")
+    except Exception as e:
+        try:
+            await callback.message.edit_text(f"❌ Xatolik: {e}")
+        except:
+            await safe_send_message(callback.from_user.id, f"❌ Xatolik: {e}")
+    await state.clear()
+    await callback.answer()
+
+@dp.callback_query(PartPostState.confirm, F.data == "cancel_post")
+async def part_post_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    try:
+        await callback.message.answer("❌ Qism post bekor qilindi.")
+    except:
+        pass
+    await callback.answer()
+
+# ================================================================
+# 29-BOSHQA CALLBACKLAR
+# ================================================================
+@dp.callback_query(F.data == "cancel_post")
+async def cancel_post(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    try:
+        await callback.message.answer("Bekor qilindi.")
+    except:
+        pass
+    await callback.answer()
+
+@dp.callback_query(F.data == "cancel_add_admin")
+async def cancel_add_admin(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    admin_image = get_admin_image()
+    admin_text = (
+        "🔐 <b>Admin Panel</b> 🔐\n\n"
+        f"👑 Adminlar: {cursor.execute('SELECT COUNT(*) FROM admins').fetchone()[0]}\n"
+        f"🎬 Media: {cursor.execute('SELECT COUNT(*) FROM media').fetchone()[0]}\n"
+        f"📹 Qismlar: {cursor.execute('SELECT COUNT(*) FROM parts').fetchone()[0]}\n"
+        f"👥 Foydalanuvchilar: {cursor.execute('SELECT COUNT(*) FROM users').fetchone()[0]}\n\n"
+        "⬇️ Quyidagi tugmalardan foydalaning:"
+    )
+    if admin_image:
+        await safe_send_photo(callback.from_user.id, photo=admin_image, caption=admin_text, reply_markup=admin_menu(), parse_mode="HTML")
+    else:
+        await safe_send_message(callback.from_user.id, admin_text, reply_markup=admin_menu(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("media_page_"))
+async def media_page_callback(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    page = int(parts[2])
+    media_type = parts[3] if len(parts) > 3 and parts[3] != 'None' else None
+    try:
+        await callback.message.edit_text("Media tanlang:", reply_markup=media_list_keyboard(media_type, page))
+    except:
+        await safe_send_message(callback.from_user.id, "Media tanlang:", reply_markup=media_list_keyboard(media_type, page))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("parts_page_"))
+async def parts_page_callback(callback: CallbackQuery):
+    _, media_id, page = callback.data.split("_")
+    try:
+        await callback.message.edit_text("Qism tanlang:", reply_markup=parts_list_keyboard(int(media_id), int(page)))
+    except:
+        await safe_send_message(callback.from_user.id, "Qism tanlang:", reply_markup=parts_list_keyboard(int(media_id), int(page)))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("back_to_media_"))
+async def back_to_media_callback(callback: CallbackQuery):
+    try:
+        await callback.message.edit_text("Media tanlang:", reply_markup=media_list_keyboard())
+    except:
+        await safe_send_message(callback.from_user.id, "Media tanlang:", reply_markup=media_list_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("back_to_parts_"))
+async def back_to_parts_callback(callback: CallbackQuery):
+    media_id = int(callback.data.split("_")[3])
+    try:
+        await callback.message.edit_text("Qism tanlang:", reply_markup=parts_list_keyboard(media_id))
+    except:
+        await safe_send_message(callback.from_user.id, "Qism tanlang:", reply_markup=parts_list_keyboard(media_id))
+    await callback.answer()
+
+# ================================================================
+# 30-UNKNOWN HANDLER
+# ================================================================
 @dp.message()
-async def echo(message: types.Message):
-    await message.answer(f"Siz yozdingiz: {message.text}")
+async def handle_unknown(message: Message):
+    # Hech qanday javob qaytarmaydi
+    pass
 
+# ================================================================
+# 31-BOTNI ISHGA TUSHIRISH
+# ================================================================
 async def main():
-    print("Bot ishga tushdi...")
+    print("=" * 60)
+    print("🤖 ANICITY RASMIY BOT - TO'LIQ VERSIYA")
+    print("=" * 60)
+    print(f"👑 Adminlar: {ADMINS}")
+    print(f"📢 Asosiy kanal: {MAIN_CHANNEL}")
+    print(f"👨‍💻 Muallif: {AUTHOR_USERNAME} ({AUTHOR_LINK})")
+    print(f"🆘 Yordam: {SUPPORT_USERNAME} ({SUPPORT_LINK})")
+    print("=" * 60)
+    print("✅ Barcha modullar muvaffaqiyatli yuklandi!")
+    print("📌 Bot to'liq ishga tushdi!")
+    print("=" * 60)
+    
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Webhook o'chirildi!")
+    except Exception as e:
+        print(f"⚠️ Webhook o'chirish xatosi: {e}")
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-''',
-        },
-    }
-
-    def get_template_list(self):
-        return [{'key': k, 'name': v['name'], 'description': v['description'], 'framework': v.get('framework', 'telebot')} 
-                for k, v in self.TEMPLATES.items()]
-
-    def get_template_code(self, key):
-        tmpl = self.TEMPLATES.get(key)
-        return tmpl['code'] if tmpl else None
-
-
-# ================================================================
-# ASOSIY BOT (AIoGRAM)
-# ================================================================
-
-class DeployBot:
-    def __init__(self, token, owner_id):
-        self.token = token
-        self.owner_id = owner_id
-        self.bot = Bot(token=token)
-        self.dp = Dispatcher(storage=MemoryStorage())
-        self.db = Database()
-        self.pm = ProcessManager()
-        self.tv = TokenValidator()
-        self.engine = DeployEngine(self.db, self.pm, self.tv)
-        self.templates = TemplateManager()
-        self.fh = FileHandler()
-        self.start_time = datetime.now()
-        self._setup_handlers()
-        self._init_dirs()
-        log.info("DeployBot (Aiogram) ishga tushdi")
-
-    def _init_dirs(self):
-        for d in [DEPLOY_DIR, LOGS_DIR, TEMPLATES_DIR]:
-            os.makedirs(d, exist_ok=True)
-
-    def _ikb(self, btns, width=2):
-        keyboard = []
-        row = []
-        for i, (text, callback) in enumerate(btns):
-            row.append(InlineKeyboardButton(text=text, callback_data=callback))
-            if (i + 1) % width == 0:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    def _rkb(self, rows):
-        keyboard = []
-        for row in rows:
-            keyboard.append([KeyboardButton(text=btn) for btn in row])
-        return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
-
-    def _setup_handlers(self):
-        dp = self.dp
-
-        @dp.message(Command("start"))
-        async def start_cmd(message: types.Message, state: FSMContext):
-            await self._start(message, state)
-
-        @dp.message(Command("help"))
-        async def help_cmd(message: types.Message):
-            await self._help(message)
-
-        @dp.message(Command("mybots"))
-        async def mybots_cmd(message: types.Message):
-            await self._my_bots(message)
-
-        @dp.message(Command("stop"))
-        async def stop_cmd(message: types.Message):
-            await self._stop_cmd(message)
-
-        @dp.message(Command("restart"))
-        async def restart_cmd(message: types.Message):
-            await self._restart_cmd(message)
-
-        @dp.message(Command("logs"))
-        async def logs_cmd(message: types.Message):
-            await self._logs_cmd(message)
-
-        @dp.message(Command("delete"))
-        async def delete_cmd(message: types.Message):
-            await self._delete_cmd(message)
-
-        @dp.message(Command("stats"))
-        async def stats_cmd(message: types.Message):
-            await self._stats_cmd(message)
-
-        @dp.message(Command("templates"))
-        async def templates_cmd(message: types.Message):
-            await self._templates_cmd(message)
-
-        @dp.message(Command("cancel"))
-        async def cancel_cmd(message: types.Message, state: FSMContext):
-            await self._cancel(message, state)
-
-        @dp.callback_query()
-        async def callback_handler(callback: types.CallbackQuery, state: FSMContext):
-            await self._callback(callback, state)
-
-        @dp.message(lambda m: m.document)
-        async def file_handler(message: types.Message, state: FSMContext):
-            await self._handle_file(message, state)
-
-        @dp.message(lambda m: m.text == f"{EMOJI_FILE} Fayl yuborin")
-        async def upload_request(message: types.Message, state: FSMContext):
-            await self._send_upload_request(message, state)
-
-        @dp.message(lambda m: m.text == f"{EMOJI_LIST} Mening botlarim")
-        async def my_bots_text(message: types.Message):
-            await self._my_bots(message)
-
-        @dp.message(lambda m: m.text == f"{EMOJI_STAR} Shablonlar")
-        async def templates_text(message: types.Message):
-            await self._templates_cmd(message)
-
-        @dp.message(lambda m: m.text == f"{EMOJI_CHART} Statistika")
-        async def stats_text(message: types.Message):
-            if message.from_user.id == self.owner_id:
-                await self._stats_cmd(message)
-            else:
-                await message.answer(f"{EMOJI_LOCK} Faqat owner uchun!")
-
-        @dp.message(lambda m: m.text == f"{EMOJI_QUESTION} Yordam")
-        async def help_text(message: types.Message):
-            await self._help(message)
-
-        @dp.message(lambda m: m.text == f"{EMOJI_PEN} Xabar yozish")
-        async def write_message(message: types.Message):
-            await message.answer(f"{EMOJI_PEN} XABAR YOZISH\n\nBot egasiga xabar yozing:")
-            self.dp.message.register(self._msg_save)
-
-        @dp.message(lambda m: m.text == f"{EMOJI_CROSS} Bekor qilish")
-        async def cancel_text(message: types.Message, state: FSMContext):
-            await self._cancel(message, state)
-
-        @dp.message()
-        async def unknown_message(message: types.Message, state: FSMContext):
-            current_state = await state.get_state()
-            if current_state == DeployStates.waiting_for_token.state:
-                await self._receive_token(message, state)
-            else:
-                pass
-
-    async def _start(self, message: types.Message, state: FSMContext):
-        uid = message.from_user.id
-        self.db.register_user(uid, message.from_user.username, message.from_user.first_name)
-        await state.clear()
-
-        try:
-            await self.bot.delete_webhook(drop_pending_updates=True)
-        except:
-            pass
-
-        if self.db.is_user_banned(uid):
-            await message.answer(f"{EMOJI_LOCK} Siz bloklangansiz.")
-            return
-
-        self.db.update_user_activity(uid)
-
-        username = message.from_user.username
-        ui = f"@{username}" if username else message.from_user.first_name
-        bots_count = self.db.count('deployments', 'user_id=?', (uid,))
-
-        text = f"""
-{EMOJI_ROCKET} BOT DEPLOY BOT (Aiogram) v7.1
-{'=' * 35}
-
-Assalomu alaykum, {ui}!
-
-Bu bot orqali o'zingiz yozgan Python kodini Telegram botga aylantirishingiz mumkin!
-
-{EMOJI_CHART} Sizning botlaringiz: {bots_count} ta
-
-{EMOJI_STAR} QADAMLAR:
-{'-' * 35}
-1. {EMOJI_FILE} .py faylni yuboring
-2. {EMOJI_KEY} Bot tokeningizni kiriting
-3. {EMOJI_CHECK} Bot avtomatik deploy bo'ladi!
-{'-' * 35}
-
-{EMOJI_INFO} MUHIM:
-✅ Deploy qilingan botlar server restartda SAQLANADI va AVTOMATIK TIKLANADI
-✅ Barcha ma'lumotlar bazada saqlanadi
-
-{EMOJI_WARNING} Fayl .py formatda bo'lishi shart!
-Maksimal hajm: {format_size(MAX_FILE_SIZE)}
-"""
-
-        markup = self._rkb([
-            [f"{EMOJI_FILE} Fayl yuborin", f"{EMOJI_STAR} Shablonlar"],
-            [f"{EMOJI_LIST} Mening botlarim", f"{EMOJI_CHART} Statistika"],
-            [f"{EMOJI_QUESTION} Yordam", f"{EMOJI_PEN} Xabar yozish"]
-        ])
-        await message.answer(text, reply_markup=markup)
-
-    async def _help(self, message: types.Message):
-        text = f"""
-{EMOJI_QUESTION} YORDAM
-{'=' * 35}
-
-{EMOJI_STAR} QANDAY ISHLAYDI?
-
-1. "{EMOJI_FILE} Fayl yuborin" tugmasini bosing
-2. .py faylni yuboring
-3. Bot tokenini kiriting
-4. Bot avtomatik deploy bo'ladi!
-
-{EMOJI_FILE} FAYL TALABLARI:
-  {EMOJI_CHECK} .py fayl bo'lishi shart
-  {EMOJI_CHECK} telebot yoki aiogram import bor
-  {EMOJI_CHECK} Maksimal hajm: {format_size(MAX_FILE_SIZE)}
-
-{EMOJI_KEY} TOKEN QAYERDAN OLINADI?
-  1. @BotFather botiga o'ting
-  2. /newbot buyrug'ini yozing
-  3. Berilgan tokenni nusxalang
-
-{EMOJI_LIST} BUYRUQLAR:
-  /mybots - Mening botlarim
-  /stop - Botni to'xtatish
-  /restart - Qayta ishga tushirish
-  /logs - Loglarni ko'rish
-  /delete - Botni o'chirish
-  /stats - Statistika
-  /templates - Shablonlar
-  /cancel - Bekor qilish
-"""
-        await message.answer(text)
-
-    async def _my_bots(self, message: types.Message):
-        uid = message.from_user.id
-        bots = await self.engine.get_user_bots(uid)
-
-        if not bots:
-            await message.answer(f"{EMOJI_LIST} Sizda hali botlar yo'q!")
-            return
-
-        text = f"{EMOJI_LIST} SIZNING BOTLARINGIZ ({len(bots)} ta):\n"
-        btns = []
-
-        for b in bots:
-            did = b['deploy_id']
-            status = b['status']
-            bot_uname = b['bot_username'] or 'Bot'
-            icon = EMOJI_GREEN if status == BOT_STATUS_RUNNING else EMOJI_RED
-
-            st = await self.engine.get_bot_status(did)
-            uptime_str = format_uptime(st['uptime_seconds']) if st else NA_TEXT
-
-            text += f"\n{icon} @{bot_uname}\n"
-            text += f"   ID: {did}\n"
-            text += f"   {EMOJI_CLOCK} Uptime: {uptime_str}\n"
-
-            btns.append((f"{icon} @{bot_uname}", f"bot_{did}"))
-
-        text += f"\n{EMOJI_ARROW} Botni tanlang:"
-        await message.answer(text, reply_markup=self._ikb(btns, 1))
-
-    async def _bot_details(self, callback: types.CallbackQuery, deploy_id: str):
-        st = await self.engine.get_bot_status(deploy_id)
-        if not st:
-            await callback.answer("Bot topilmadi!", show_alert=True)
-            return
-
-        if st['status'] == BOT_STATUS_RUNNING:
-            status_text = f"{EMOJI_GREEN} Ishlayapti"
-        elif st['status'] == BOT_STATUS_STOPPED:
-            status_text = f"{EMOJI_RED} To'xtagan"
-        else:
-            status_text = f"{EMOJI_WHITE} {st['status']}"
-
-        uptime = format_uptime(st['uptime_seconds'])
-        bot_uname = st.get('bot_username') or NA_TEXT
-        main_file = st.get('main_file') or NA_TEXT
-        created = st.get('created_at', NA_TEXT)
-        if len(created) > 16:
-            created = created[:16]
-
-        text = f"""
-{status_text}
-{'=' * 30}
-
-{EMOJI_INFO} ID: {deploy_id}
-{EMOJI_BOT} Bot: @{bot_uname}
-{EMOJI_PAGE} Fayl: {main_file}
-{EMOJI_CLOCK} Yaratilgan: {created}
-
-{EMOJI_CHART} HOLAT:
-  Status: {status_text}
-  PID: {st.get('pid', NA_TEXT)}
-  Uptime: {uptime}
-  Restarts: {st.get('restart_count', 0)}
-  Loglar: {st.get('log_lines', 0)} ta
-"""
-
-        btns = []
-        if st['status'] == BOT_STATUS_STOPPED:
-            btns.append((f"{EMOJI_PLAY} Ishga tushirish", f"start_{deploy_id}"))
-        btns.extend([
-            (f"{EMOJI_RESTART} Qayta ishga tushirish", f"restart_{deploy_id}"),
-            (f"{EMOJI_STOP} To'xtatish", f"stop_{deploy_id}"),
-            (f"{EMOJI_LIST} Loglar", f"logs_{deploy_id}"),
-            (f"{EMOJI_TRASH} O'chirish", f"del_{deploy_id}"),
-            (f"{EMOJI_BACK} Orqaga", "back_to_bots"),
-        ])
-
-        await callback.message.edit_text(text, reply_markup=self._ikb(btns, 1))
-        await callback.answer()
-
-    async def _bot_action(self, callback: types.CallbackQuery, deploy_id: str, action: str):
-        uid = callback.from_user.id
-
-        if action == 'start':
-            success, msg = await self.engine.start_bot(deploy_id, uid)
-        elif action == 'stop':
-            success, msg = await self.engine.stop_bot(deploy_id, uid)
-        elif action == 'restart':
-            success, msg = await self.engine.restart_bot(deploy_id, uid)
-        elif action == 'del':
-            success, msg = await self.engine.delete_bot(deploy_id, uid)
-            if success:
-                await callback.answer(f"{EMOJI_CHECK} Bot o'chirildi!", show_alert=True)
-                await callback.message.edit_text(f"{EMOJI_TRASH} Bot o'chirildi!")
-                return
-            else:
-                await callback.answer(f"{EMOJI_CROSS} {msg}", show_alert=True)
-                return
-        else:
-            return
-
-        await callback.answer(f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
-        if action in ('start', 'stop', 'restart'):
-            await asyncio.sleep(0.5)
-            await self._bot_details(callback, deploy_id)
-
-    async def _show_logs(self, callback: types.CallbackQuery, deploy_id: str):
-        logs = await self.engine.get_logs(deploy_id, limit=30)
-        if not logs:
-            await callback.answer("Loglar yo'q!", show_alert=True)
-            return
-
-        text = f"{EMOJI_LIST} LOGLAR:\n\n"
-        for l in logs[-30:]:
-            line = l[:200] if len(l) > 200 else l
-            text += f"│ {line}\n"
-
-        await callback.message.edit_text(
-            truncate_text(text),
-            reply_markup=self._ikb([(f"{EMOJI_BACK} Orqaga", f"bot_{deploy_id}")], 1)
-        )
-        await callback.answer()
-
-    async def _stats_cmd(self, message: types.Message):
-        if message.from_user.id != self.owner_id:
-            await message.answer(f"{EMOJI_LOCK} Faqat owner uchun!")
-            return
-
-        stats = self.db.get_stats_summary()
-        uptime = int((datetime.now() - self.start_time).total_seconds())
-
-        text = f"""
-{EMOJI_CHART} UMUMIY STATISTIKA
-{'=' * 35}
-
-{EMOJI_BOT} Botlar jami: {stats['total']}
-{EMOJI_GREEN} Ishlayotgan: {stats['running']}
-{EMOJI_RED} To'xtatilgan: {stats['stopped']}
-{EMOJI_CROSS} Muvaffaqiyatsiz: {stats['failed']}
-{EMOJI_QUESTION} Foydalanuvchilar: {stats['users']}
-{EMOJI_CLOCK} Bot uptime: {format_uptime(uptime)}
-
-{EMOJI_STAR} BUGUN:
-  Deploylar: {stats['today'].get('total_deploys', 0)}
-  Muvaffaqiyatli: {stats['today'].get('successful', 0)}
-  Yangi foydalanuvchilar: {stats['today'].get('new_users', 0)}
-"""
-        await message.answer(text)
-
-    async def _templates_cmd(self, message: types.Message):
-        templates = self.templates.get_template_list()
-        text = f"{EMOJI_STAR} BOT SHABLONLARI\n\n"
-        btns = []
-
-        for tmpl in templates:
-            framework_icon = "🤖" if tmpl['framework'] == 'aiogram' else "📦"
-            text += f"{framework_icon} {tmpl['name']}\n   {tmpl['description']}\n\n"
-            btns.append((f"{framework_icon} {tmpl['name']}", f"tmpl_{tmpl['key']}"))
-
-        btns.append((f"{EMOJI_BACK} Orqaga", "back_to_menu"))
-        await message.answer(text, reply_markup=self._ikb(btns, 1))
-
-    async def _send_template(self, callback: types.CallbackQuery, tmpl_key: str):
-        code = self.templates.get_template_code(tmpl_key)
-        if not code:
-            await callback.answer("Shablon topilmadi!", show_alert=True)
-            return
-
-        temp_file = tempfile.mkdtemp(prefix='template_')
-        file_path = os.path.join(temp_file, f"{tmpl_key}.py")
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(code)
-
-        try:
-            with open(file_path, 'rb') as f:
-                await callback.message.answer_document(
-                    types.FSInputFile(file_path, filename=f"{tmpl_key}.py"),
-                    caption=f"{EMOJI_STAR} {tmpl_key}.py shabloni"
-                )
-        except Exception as e:
-            await callback.message.answer(f"{EMOJI_CROSS} Fayl yuborilmadi: {e}\n\n```\n{code}\n```")
-        finally:
-            shutil.rmtree(temp_file, ignore_errors=True)
-
-        await callback.answer()
-
-    async def _send_upload_request(self, message: types.Message, state: FSMContext):
-        await state.set_state(DeployStates.waiting_for_file)
-
-        text = f"""
-{EMOJI_FILE} FAYL YUBORISH
-{'=' * 30}
-
-Bot kodingizni .py fayl ko'rinishida yuboring.
-
-{EMOJI_STAR} TALABLAR:
-{EMOJI_CHECK} .py fayl bo'lishi shart
-{EMOJI_CHECK} Maksimal hajm: {format_size(MAX_FILE_SIZE)}
-
-{EMOJI_INFO} Masalan: mybot.py
-"""
-        markup = self._rkb([[f"{EMOJI_CROSS} Bekor qilish"]])
-        await message.answer(text, reply_markup=markup)
-
-    async def _handle_file(self, message: types.Message, state: FSMContext):
-        uid = message.from_user.id
-
-        if self.db.is_user_banned(uid):
-            await message.answer(f"{EMOJI_LOCK} Siz bloklangansiz.")
-            return
-
-        current_state = await state.get_state()
-        if current_state != DeployStates.waiting_for_file.state:
-            await message.answer(f"{EMOJI_CROSS} Avval \"{EMOJI_FILE} Fayl yuborin\" tugmasini bosing!")
-            return
-
-        if not message.document:
-            await message.answer(f"{EMOJI_CROSS} Iltimos, fayl yuboring!")
-            return
-
-        filename = message.document.file_name or ""
-        ext = os.path.splitext(filename)[1].lower()
-
-        if ext not in ALLOWED_EXTENSIONS:
-            await message.answer(f"{EMOJI_CROSS} Faqat .py fayllar qabul qilinadi!\nMasalan: mybot.py")
-            return
-
-        if message.document.file_size and message.document.file_size > MAX_FILE_SIZE:
-            await message.answer(f"{EMOJI_CROSS} Fayl juda katta!\nMaksimal: {format_size(MAX_FILE_SIZE)}")
-            return
-
-        temp_dir = tempfile.mkdtemp(prefix='bot_file_')
-        file_path = os.path.join(temp_dir, safe_filename(filename))
-
-        try:
-            file_info = await self.bot.get_file(message.document.file_id)
-            downloaded = await self.bot.download_file(file_info.file_path)
-            with open(file_path, 'wb') as f:
-                f.write(downloaded.getvalue())
-        except Exception as e:
-            await message.answer(f"{EMOJI_CROSS} Faylni yuklab bo'lmadi: {str(e)[:80]}")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return
-
-        valid, msg = self.fh.validate_file(file_path)
-        if not valid:
-            await message.answer(f"{EMOJI_CROSS} {msg}")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return
-
-        analysis = self.engine.code_analyzer.analyze_code(file_path)
-        analysis_text = self.engine.code_analyzer.get_analysis_text(analysis)
-
-        if not analysis['valid']:
-            await message.answer(f"{EMOJI_CROSS} Kodda xatoliklar bor:\n\n{analysis_text}")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return
-
-        await message.answer(f"{EMOJI_CHECK} Fayl yuklandi!\n\n{analysis_text}\n\nDavom etish uchun token yuboring.")
-
-        await state.update_data({
-            'file_path': file_path,
-            'temp_dir': temp_dir,
-            'analysis': analysis,
-            'filename': filename,
-        })
-        await state.set_state(DeployStates.waiting_for_token)
-
-        await message.answer(f"{EMOJI_KEY} BOT TOKEN\n\n@BotFather dan olgan tokeningizni yuboring.")
-
-    async def _receive_token(self, message: types.Message, state: FSMContext):
-        data = await state.get_data()
-        if not data:
-            await message.answer(f"{EMOJI_CROSS} Jarayon buzildi. Qaytadan boshlang.")
-            await state.clear()
-            return
-
-        token = message.text.strip().replace(' ', '').replace('\n', '')
-
-        if not token:
-            await message.answer(f"{EMOJI_CROSS} Token bo'sh!")
-            return
-
-        if len(token) < 30:
-            await message.answer(f"{EMOJI_CROSS} Token juda qisqa!")
-            return
-
-        progress = await message.answer(f"{EMOJI_HOURGLASS} Deploy qilinmoqda...")
-
-        try:
-            result = await self.engine.deploy(
-                message.from_user.id,
-                data['file_path'],
-                token
-            )
-        except Exception as e:
-            log.error(f"Deploy xatosi: {e}")
-            result = (None, f"Xato: {str(e)[:100]}", None)
-
-        temp_dir = data.get('temp_dir')
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-        deploy_id, proc_msg, analysis = result
-
-        if deploy_id is None:
-            await progress.edit_text(
-                f"{EMOJI_CROSS} DEPLOY MUVAFFAQIYATSIZ\n\nSabab: {proc_msg}"
-            )
-        else:
-            filename = data.get('filename', 'bot.py')
-            lines = analysis['line_count'] if analysis else 0
-
-            await progress.edit_text(
-                f"{EMOJI_CHECK} DEPLOY MUVAFFAQIYATLI!\n\n"
-                f"{EMOJI_INFO} Bot ID: {deploy_id}\n"
-                f"{EMOJI_PAGE} Fayl: {filename}\n"
-                f"{EMOJI_SIZE} Qatorlar: {lines}\n\n"
-                f"{EMOJI_GREEN} Bot ishga tushdi va tayyor!\n"
-                f"{EMOJI_SAVE} Bot server restartda avtomatik tiklanadi!",
-                reply_markup=self._ikb([(f"{EMOJI_LIST} Botni ko'rish", f"bot_{deploy_id}")], 1)
-            )
-
-        await state.clear()
-
-    async def _cancel(self, message: types.Message, state: FSMContext):
-        data = await state.get_data()
-        if data and data.get('temp_dir'):
-            shutil.rmtree(data['temp_dir'], ignore_errors=True)
-        await state.clear()
-        await message.answer(
-            f"{EMOJI_CROSS} Jarayon bekor qilindi!",
-            reply_markup=self._rkb([[f"{EMOJI_FILE} Fayl yuborin"], [f"{EMOJI_LIST} Mening botlarim"], [f"{EMOJI_QUESTION} Yordam"]])
-        )
-
-    async def _callback(self, callback: types.CallbackQuery, state: FSMContext):
-        data = callback.data
-
-        try:
-            if data == "upload_file":
-                await self._send_upload_request(callback.message, state)
-                await callback.answer()
-
-            elif data == "back_to_bots":
-                await self._my_bots(callback.message)
-                await callback.answer()
-
-            elif data == "back_to_menu":
-                await self._start(callback.message, state)
-                await callback.answer()
-
-            elif data.startswith("bot_"):
-                await self._bot_details(callback, data[4:])
-
-            elif data.startswith("restart_"):
-                await self._bot_action(callback, data[8:], "restart")
-
-            elif data.startswith("stop_"):
-                await self._bot_action(callback, data[5:], "stop")
-
-            elif data.startswith("start_"):
-                await self._bot_action(callback, data[6:], "start")
-
-            elif data.startswith("del_"):
-                await self._bot_action(callback, data[4:], "del")
-
-            elif data.startswith("logs_"):
-                await self._show_logs(callback, data[5:])
-
-            elif data.startswith("tmpl_"):
-                await self._send_template(callback, data[5:])
-
-            else:
-                await callback.answer()
-
-        except Exception as e:
-            log.error(f"Callback xatosi: {e}")
-            await callback.answer(f"{EMOJI_CROSS} Xatolik!", show_alert=True)
-
-    async def _msg_save(self, message: types.Message):
-        if not message.text or not message.text.strip():
-            await message.answer(f"{EMOJI_CROSS} Xabar bo'sh!")
-            return
-
-        now = str(datetime.now())
-        uid = message.from_user.id
-        username = message.from_user.username or ''
-
-        self.db.execute(
-            'INSERT INTO user_messages (user_id, username, message_text, created_at, status) VALUES (?, ?, ?, ?, ?)',
-            (uid, username, message.text.strip(), now, 'pending')
-        )
-
-        await message.answer(f"{EMOJI_CHECK} Xabar qabul qilindi!")
-
-        try:
-            await self.bot.send_message(
-                self.owner_id,
-                f"{EMOJI_MESSAGE} YANGI XABAR!\n\n👤 @{username}\n🆔 {uid}\n📝 {message.text.strip()}"
-            )
-        except Exception:
-            pass
-
-    async def _stop_cmd(self, message: types.Message):
-        await message.answer(f"{EMOJI_STOP} To'xtatmoqchi bot ID sini yuboring:")
-        self.dp.message.register(self._stop_exec, lambda m: m.text and not m.text.startswith('/'))
-
-    async def _stop_exec(self, message: types.Message):
-        did = message.text.strip()
-        if not did:
-            await message.answer(f"{EMOJI_CROSS} ID bo'sh!")
-            return
-        success, msg = await self.engine.stop_bot(did, message.from_user.id)
-        await message.answer(f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
-
-    async def _restart_cmd(self, message: types.Message):
-        await message.answer(f"{EMOJI_RESTART} Qayta ishga tushirmoqchi bot ID sini yuboring:")
-        self.dp.message.register(self._restart_exec, lambda m: m.text and not m.text.startswith('/'))
-
-    async def _restart_exec(self, message: types.Message):
-        did = message.text.strip()
-        if not did:
-            await message.answer(f"{EMOJI_CROSS} ID bo'sh!")
-            return
-        success, msg = await self.engine.restart_bot(did, message.from_user.id)
-        await message.answer(f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
-
-    async def _logs_cmd(self, message: types.Message):
-        await message.answer(f"{EMOJI_LIST} Loglarini ko'rishmoqchi bot ID sini yuboring:")
-        self.dp.message.register(self._logs_exec, lambda m: m.text and not m.text.startswith('/'))
-
-    async def _logs_exec(self, message: types.Message):
-        did = message.text.strip()
-        if not did:
-            await message.answer(f"{EMOJI_CROSS} ID bo'sh!")
-            return
-        logs = await self.engine.get_logs(did, limit=30)
-        if not logs:
-            await message.answer(f"{EMOJI_LIST} Loglar yo'q!")
-            return
-        text = f"{EMOJI_LIST} LOGLAR:\n\n" + "\n".join(f"│ {l[:150]}" for l in logs[-30:])
-        await message.answer(truncate_text(text))
-
-    async def _delete_cmd(self, message: types.Message):
-        await message.answer(f"{EMOJI_TRASH} O'chirmoqchi bot ID sini yuboring:")
-        self.dp.message.register(self._delete_exec, lambda m: m.text and not m.text.startswith('/'))
-
-    async def _delete_exec(self, message: types.Message):
-        did = message.text.strip()
-        if not did:
-            await message.answer(f"{EMOJI_CROSS} ID bo'sh!")
-            return
-        success, msg = await self.engine.delete_bot(did, message.from_user.id)
-        await message.answer(f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
-
-    async def on_startup(self):
-        log.info("=" * 50)
-        log.info("Bot ishga tushmoqda...")
-        
-        try:
-            await self.bot.delete_webhook(drop_pending_updates=True)
-            log.info("Webhook o'chirildi")
-        except Exception as e:
-            log.warning(f"Webhook o'chirish xatosi: {e}")
-        
-        # ========== MUHIM: AVVALGI BOTLARNI QAYTA TIKLASH ==========
-        log.info("Avvalgi botlarni qayta tiklash boshlanmoqda...")
-        restored, failed = self.pm.restore_all_bots(self.db)
-        
-        if restored > 0:
-            log.info(f"✅ {restored} ta bot qayta tiklandi")
-        if failed > 0:
-            log.warning(f"❌ {failed} ta bot qayta tiklanmadi")
-        
-        log.info("=" * 50)
-
-    async def on_shutdown(self):
-        log.info("Bot to'xtatilmoqda...")
-        self.pm.stop_all()
-        self.fh.cleanup_all()
-        self.db.close()
-        await self.bot.session.close()
-        log.info("Bot to'xtatildi")
-
-    async def run(self):
-        await self.on_startup()
-        try:
-            me = await self.bot.get_me()
-            log.info(f"Bot ishga tushdi: @{me.username}")
-            print(f"{EMOJI_ROCKET} Bot ishga tushdi: @{me.username}")
-            await self.dp.start_polling(self.bot)
-        except Exception as e:
-            log.error(f"Bot xatosi: {e}")
-        finally:
-            await self.on_shutdown()
-
-
-# ================================================================
-# BANNER
-# ================================================================
-
-def print_banner():
-    sys_info = get_system_info()
-    banner = f"""
-{'=' * 55}
-{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v7.1 (Aiogram)
-{'=' * 55}
-
-  Versiya:      7.1 (To'liq qayta tiklanadi)
-  Sana:         2026-04-07
-  Platform:     {sys_info['platform']} {sys_info['platform_release']}
-  Python:       {sys_info['python_version']}
-
-{'=' * 55}
-  XUSUSIYATLAR:
-{'=' * 55}
-  {EMOJI_CHECK} Aiogram va Telebot bilan ishlaydi
-  {EMOJI_CHECK} Oddiy .py fayl qabul qiladi
-  {EMOJI_CHECK} Kod tahlili va sifat bahosi
-  {EMOJI_CHECK} Xavfli kodlarni bloklash
-  {EMOJI_CHECK} Avtomatik qayta ishga tushirish
-  {EMOJI_CHECK} Bot shablonlari
-  {EMOJI_CHECK} ✅ Server restartda avvalgi botlar avtomatik tiklanadi
-  {EMOJI_CHECK} ✅ Baza ma'lumotlari saqlanadi va qayta tiklanadi
-
-{'=' * 55}
-  SOZLAMALAR:
-{'=' * 55}
-  Maksimal fayl:  {format_size(MAX_FILE_SIZE)}
-  Auto-restart:   {'Yoq' if AUTO_RESTART else 'Yo' + "'q"}
-  Max restart:    {MAX_RESTART_ATTEMPTS} ta
-  DB:             deploy_bots.db
-
-{'=' * 55}
-"""
-    print(banner)
-
-
-# ================================================================
-# ASOSIY FUNKSIYA
-# ================================================================
-
-async def main():
-    print_banner()
-
-    bot = DeployBot(BOT_TOKEN, OWNER_ID)
-    await bot.run()
-
-
-def signal_handler(signum, frame):
-    log.info(f"Signal qabul qilindi: {signum}")
-    print(f"\n{EMOJI_STOP} Bot to'xtatilmoqda...")
-    sys.exit(0)
-
-
-if __name__ == "__main__":
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print(f"\n{EMOJI_STOP} Bot to'xtatildi")
-    except Exception as e:
-        print(f"\n{EMOJI_CROSS} XATOLIK: {e}")
-        traceback.print_exc()
