@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: '*/0.005 * * * *'  # Har 5 daqiqada qayta ishga tushadi
+    - cron: '*/0.5 * * * *'  # Har 5 daqiqada qayta ishga tushadi
 
 jobs:
   run-bot:
