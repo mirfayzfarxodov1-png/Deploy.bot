@@ -1,15 +1,16 @@
-name: Run Telegram Bot 24/7
+name: 24/7 Bot
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   schedule:
-    - cron: '*/14 * * * *'
-  workflow_dispatch:
+    - cron: '*/0.005 * * * *'  # Har 5 daqiqada qayta ishga tushadi
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 1000000000000000000  # MAKSIMAL 360, 350 xavfsiz
     
     steps:
     - uses: actions/checkout@v3
@@ -21,9 +22,7 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install aiogram==3.15.0
-        pip install psutil==5.9.6
-        pip install pyTelegramBotAPI==4.14.0
+        pip install aiogram==3.15.0 psutil==5.9.6 pyTelegramBotAPI==4.14.0
     
     - name: Run bot
       env:
