@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ================================================================
-# BOT DEPLOY BOT - AIOGRAM VERSIYA (TO'LIQ TUZATILGAN)
-# Version: 6.0
-# Sana: 2026-04-06
+# BOT DEPLOY BOT - AIOGRAM VERSIYA (TO'LIQ SAQLANADI)
+# Version: 7.0
+# Sana: 2026-04-07
 # ================================================================
-# TUZATILDI: Server restartda deploy qilingan botlar avtomatik tiklanadi
-# TUZATILDI: Baza saqlanadi va qayta tiklanadi
+# TUZATILDI: Server restartda deploy qilingan botlar saqlanadi va tiklanadi
+# TUZATILDI: Baza va fayllar to'liq saqlanadi
 # ================================================================
 
 import asyncio
@@ -121,6 +121,7 @@ EMOJI_INFO = "ℹ️"
 EMOJI_LOCK = "⛔"
 EMOJI_MESSAGE = "💬"
 EMOJI_SAVE = "💾"
+EMOJI_DATABASE = "🗄️"
 
 YES_TEXT = "✅ Bor"
 NO_TEXT = "❌ Yo'q"
@@ -190,7 +191,7 @@ def truncate_text(text, max_length=4096):
 
 
 # ================================================================
-# MA'LUMOTLAR BAZASI (TO'LIQ SAQLANADI)
+# MA'LUMOTLAR BAZASI (TO'LIQ SAQLANADI VA BACKUP QILINADI)
 # ================================================================
 
 class Database:
@@ -208,20 +209,23 @@ class Database:
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA foreign_keys=ON")
+            self.conn.execute("PRAGMA busy_timeout=5000")
             log.info(f"Bazaga ulandi: {self.db_path}")
         except Exception as e:
             log.error(f"Bazaga ulanishda xatolik: {e}")
             raise
 
     def _migrate_database(self):
-        """Eski bazani yangilash (agar kerak bo'lsa)"""
+        """Eski bazani yangilash"""
         try:
-            # deployments jadvalida updated_at maydoni borligini tekshirish
             cursor = self.conn.execute("PRAGMA table_info(deployments)")
             columns = [col[1] for col in cursor.fetchall()]
             if 'updated_at' not in columns:
                 self.conn.execute("ALTER TABLE deployments ADD COLUMN updated_at TEXT")
                 log.info("Database migrated: added updated_at column")
+            if 'code_dir' not in columns:
+                self.conn.execute("ALTER TABLE deployments ADD COLUMN code_dir TEXT")
+                log.info("Database migrated: added code_dir column")
         except Exception as e:
             log.warning(f"Migration xatosi: {e}")
 
@@ -380,12 +384,12 @@ class Database:
 
     def get_all_deploys(self):
         """Barcha deploylarni olish (server restartda ishlatiladi)"""
+        return self.fetchall('SELECT * FROM deployments')
+
+    def get_running_deploys(self):
+        """Ishlayotgan deploylarni olish"""
         return self.fetchall('SELECT * FROM deployments WHERE status IN (?, ?)',
                              (BOT_STATUS_RUNNING, BOT_STATUS_STARTING))
-
-    def get_all_deploys_for_restore(self):
-        """Qayta tiklash uchun barcha deploylarni olish"""
-        return self.fetchall('SELECT * FROM deployments')
 
     def update_deploy_status(self, deploy_id, status, **kwargs):
         now = str(datetime.now())
@@ -404,10 +408,12 @@ class Database:
         if deploy and deploy['code_dir'] and os.path.exists(deploy['code_dir']):
             try:
                 shutil.rmtree(deploy['code_dir'], ignore_errors=True)
+                log.info(f"Deploy papkasi o'chirildi: {deploy['code_dir']}")
             except Exception as e:
                 log.warning(f"Deploy papkasini o'chirish xatosi: {e}")
         self.execute('DELETE FROM deployments WHERE deploy_id=?', (deploy_id,))
         self.execute('DELETE FROM bot_logs WHERE deploy_id=?', (deploy_id,))
+        log.info(f"Deploy {deploy_id} o'chirildi")
 
     def get_stats_summary(self):
         total = self.count('deployments')
@@ -439,6 +445,24 @@ class Database:
         except Exception as e:
             log.error(f"Backup xatosi: {e}")
             return None
+
+    def get_database_size(self):
+        """Baza hajmini olish"""
+        try:
+            size = os.path.getsize(self.db_path)
+            return format_size(size)
+        except:
+            return "Noma'lum"
+
+    def vacuum(self):
+        """Bazani optimallashtirish"""
+        try:
+            self.conn.execute("VACUUM")
+            log.info("Database VACUUM qilindi")
+            return True
+        except Exception as e:
+            log.error(f"VACUUM xatosi: {e}")
+            return False
 
     def close(self):
         try:
@@ -486,6 +510,7 @@ class FileHandler:
             target_path = os.path.join(target_dir, safe_name)
             os.makedirs(target_dir, exist_ok=True)
             shutil.copy2(file_path, target_path)
+            log.info(f"Fayl saqlandi: {target_path}")
             return os.path.normpath(target_path)
         except Exception as e:
             log.error(f"Faylni saqlash xatosi: {e}")
@@ -825,6 +850,7 @@ class ProcessManager:
                 return False, f"To'xtatishda xato: {e}"
         info['status'] = BOT_STATUS_STOPPED
         info['stopped_at'] = str(datetime.now())
+        log.info(f"Bot {deploy_id} to'xtatildi")
         return True, "Bot to'xtatildi"
 
     def restart(self, deploy_id):
@@ -871,11 +897,13 @@ class ProcessManager:
 
     def restore_all_bots(self, db):
         """Server restartdan keyin barcha botlarni qayta ishga tushirish"""
-        deploys = db.get_all_deploys_for_restore()
+        # Barcha deploylarni olish (statusidan qat'iy nazar)
+        deploys = db.get_all_deploys()
         log.info(f"Qayta tiklanadigan botlar: {len(deploys)} ta")
         
         restored = 0
         failed = 0
+        skipped = 0
         
         for deploy in deploys:
             deploy_id = deploy['deploy_id']
@@ -919,7 +947,7 @@ class ProcessManager:
             
             time.sleep(0.5)  # Rate limiting
         
-        log.info(f"Qayta tiklash yakunlandi: {restored} restored, {failed} failed")
+        log.info(f"Qayta tiklash yakunlandi: {restored} restored, {failed} failed, {skipped} skipped")
         return restored, failed
 
     def stop_all(self):
@@ -1053,11 +1081,13 @@ class DeployEngine:
             self.db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, pid=pid, started_at=now)
             self.db.execute('UPDATE users SET bot_count=bot_count+1, total_deploys=total_deploys+1, '
                             'successful_deploys=successful_deploys+1, last_active=? WHERE user_id=?', (now, user_id))
+            log.info(f"Bot {deploy_id} muvaffaqiyatli deploy qilindi")
             return deploy_id, proc_msg, analysis
         else:
             self.db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message=proc_msg)
             self.db.execute('UPDATE users SET total_deploys=total_deploys+1, failed_deploys=failed_deploys+1, '
                             'last_active=? WHERE user_id=?', (now, user_id))
+            log.error(f"Bot {deploy_id} deploy qilishda xato: {proc_msg}")
             return None, proc_msg, analysis
 
     async def stop_bot(self, deploy_id, user_id):
@@ -1068,6 +1098,7 @@ class DeployEngine:
         if success:
             now = str(datetime.now())
             self.db.update_deploy_status(deploy_id, BOT_STATUS_STOPPED, stopped_at=now)
+            log.info(f"Bot {deploy_id} to'xtatildi")
         return success, msg
 
     async def restart_bot(self, deploy_id, user_id):
@@ -1082,6 +1113,7 @@ class DeployEngine:
             now = str(datetime.now())
             new_count = proc_info.get('restart_count', 0) + 1
             self.db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, restart_count=new_count, last_restart=now)
+            log.info(f"Bot {deploy_id} qayta ishga tushirildi")
         return success, msg
 
     async def start_bot(self, deploy_id, user_id):
@@ -1098,6 +1130,7 @@ class DeployEngine:
             now = str(datetime.now())
             pid = self.pm.processes[deploy_id]['process'].pid
             self.db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, pid=pid, started_at=now)
+            log.info(f"Bot {deploy_id} ishga tushirildi")
         else:
             self.db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message=msg)
         return success, msg
@@ -1110,6 +1143,7 @@ class DeployEngine:
         self.db.delete_deploy(deploy_id)
         self.db.execute('UPDATE users SET bot_count=MAX(bot_count-1,0), last_active=? WHERE user_id=?',
                         (str(datetime.now()), user_id))
+        log.info(f"Bot {deploy_id} o'chirildi")
         return True, "Bot o'chirildi"
 
     async def get_bot_status(self, deploy_id):
@@ -1312,6 +1346,7 @@ class DeployBot:
     def _init_dirs(self):
         for d in [DEPLOY_DIR, LOGS_DIR, TEMPLATES_DIR]:
             os.makedirs(d, exist_ok=True)
+        log.info(f"Papkalar tayyor: {DEPLOY_DIR}, {LOGS_DIR}, {TEMPLATES_DIR}")
 
     def _ikb(self, btns, width=2):
         keyboard = []
@@ -1384,11 +1419,22 @@ class DeployBot:
                 await self.bot.send_document(
                     message.chat.id,
                     types.FSInputFile(backup_path, filename=os.path.basename(backup_path)),
-                    caption=f"{EMOJI_SAVE} Baza backup qilindi!"
+                    caption=f"{EMOJI_SAVE} Baza backup qilindi!\n📁 Hajm: {self.db.get_database_size()}"
                 )
                 os.remove(backup_path)
             else:
                 await message.answer(f"{EMOJI_CROSS} Backup qilib bo'lmadi!")
+
+        @dp.message(Command("vacuum"))
+        async def vacuum_cmd(message: types.Message):
+            if message.from_user.id != self.owner_id:
+                await message.answer(f"{EMOJI_LOCK} Faqat owner uchun!")
+                return
+            result = self.db.vacuum()
+            if result:
+                await message.answer(f"{EMOJI_CHECK} Baza optimallashtirildi!\n📁 Hajm: {self.db.get_database_size()}")
+            else:
+                await message.answer(f"{EMOJI_CROSS} Optimallashtirishda xatolik!")
 
         @dp.callback_query()
         async def callback_handler(callback: types.CallbackQuery, state: FSMContext):
@@ -1459,7 +1505,7 @@ class DeployBot:
         bots_count = self.db.count('deployments', 'user_id=?', (uid,))
 
         text = f"""
-{EMOJI_ROCKET} BOT DEPLOY BOT (Aiogram)
+{EMOJI_ROCKET} BOT DEPLOY BOT (Aiogram) v7.0
 {'=' * 35}
 
 Assalomu alaykum, {ui}!
@@ -1467,6 +1513,7 @@ Assalomu alaykum, {ui}!
 Bu bot orqali o'zingiz yozgan Python kodini Telegram botga aylantirishingiz mumkin!
 
 {EMOJI_CHART} Sizning botlaringiz: {bots_count} ta
+{EMOJI_DATABASE} Baza hajmi: {self.db.get_database_size()}
 
 {EMOJI_STAR} QADAMLAR:
 {'-' * 35}
@@ -1474,6 +1521,12 @@ Bu bot orqali o'zingiz yozgan Python kodini Telegram botga aylantirishingiz mumk
 2. {EMOJI_KEY} Bot tokeningizni kiriting
 3. {EMOJI_CHECK} Bot avtomatik deploy bo'ladi!
 {'-' * 35}
+
+{EMOJI_INFO} MUHIM MA'LUMOT:
+✅ Deploy qilingan botlar server restartda SAQLANADI va AVTOMATIK TIKLANADI
+✅ Barcha ma'lumotlar bazada saqlanadi
+✅ Backup qilish: /backup
+✅ Bazani optimallashtirish: /vacuum
 
 {EMOJI_WARNING} Fayl .py formatda bo'lishi shart!
 Maksimal hajm: {format_size(MAX_FILE_SIZE)}
@@ -1517,7 +1570,13 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
   /stats - Statistika
   /templates - Shablonlar
   /backup - Bazani backup qilish
+  /vacuum - Bazani optimallashtirish
   /cancel - Bekor qilish
+
+{EMOJI_INFO} SAQLASH VA TIKLASH:
+  ✅ Deploy qilingan botlar avtomatik saqlanadi
+  ✅ Server restartda avtomatik tiklanadi
+  ✅ Barcha ma'lumotlar bazada saqlanadi
 """
         await message.answer(text)
 
@@ -1662,11 +1721,16 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
 {EMOJI_CROSS} Muvaffaqiyatsiz: {stats['failed']}
 {EMOJI_QUESTION} Foydalanuvchilar: {stats['users']}
 {EMOJI_CLOCK} Bot uptime: {format_uptime(uptime)}
+{EMOJI_DATABASE} Baza hajmi: {self.db.get_database_size()}
 
 {EMOJI_STAR} BUGUN:
   Deploylar: {stats['today'].get('total_deploys', 0)}
   Muvaffaqiyatli: {stats['today'].get('successful', 0)}
   Yangi foydalanuvchilar: {stats['today'].get('new_users', 0)}
+
+{EMOJI_INFO} SAQLASH HOLATI:
+  ✅ Server restartda botlar avtomatik tiklanadi
+  ✅ Barcha ma'lumotlar saqlanadi
 """
         await message.answer(text)
 
@@ -1840,7 +1904,8 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
                 f"{EMOJI_PAGE} Fayl: {filename}\n"
                 f"{EMOJI_SIZE} Qatorlar: {lines}\n\n"
                 f"{EMOJI_GREEN} Bot ishga tushdi va tayyor!\n"
-                f"{EMOJI_INFO} Loglarni /logs buyrug'i bilan ko'ring.",
+                f"{EMOJI_INFO} Loglarni /logs buyrug'i bilan ko'ring.\n"
+                f"{EMOJI_SAVE} Bot server restartda avtomatik tiklanadi!",
                 reply_markup=self._ikb([(f"{EMOJI_LIST} Botni ko'rish", f"bot_{deploy_id}")], 1)
             )
 
@@ -1977,7 +2042,10 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
         await message.answer(f"{EMOJI_CHECK if success else EMOJI_CROSS} {msg}")
 
     async def on_startup(self):
-        log.info("Bot ishga tushmoqda...")
+        log.info("=" * 50)
+        log.info("BOT DEPLOY BOT v7.0 ISHGA TUSHMOQDA")
+        log.info("=" * 50)
+        
         try:
             await self.bot.delete_webhook(drop_pending_updates=True)
             log.info("Webhook o'chirildi")
@@ -1987,10 +2055,16 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
         # Avvalgi botlarni qayta tiklash (BAZA SAQLANADI)
         log.info("Avvalgi botlarni qayta tiklash boshlanmoqda...")
         restored, failed = self.pm.restore_all_bots(self.db)
+        
+        log.info("=" * 50)
         if restored > 0:
             log.info(f"✅ {restored} ta bot qayta tiklandi")
         if failed > 0:
             log.warning(f"❌ {failed} ta bot qayta tiklanmadi")
+        log.info(f"📁 Baza hajmi: {self.db.get_database_size()}")
+        log.info(f"📂 Deploy papkasi: {os.path.abspath(DEPLOY_DIR)}")
+        log.info(f"🗄️ Baza manzili: {os.path.abspath(self.db.db_path)}")
+        log.info("=" * 50)
 
     async def on_shutdown(self):
         log.info("Bot to'xtatilmoqda...")
@@ -2006,6 +2080,7 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
             me = await self.bot.get_me()
             log.info(f"Bot ishga tushdi: @{me.username}")
             print(f"{EMOJI_ROCKET} Bot ishga tushdi: @{me.username}")
+            print(f"{EMOJI_SAVE} Deploy qilingan botlar server restartda avtomatik tiklanadi!")
             await self.dp.start_polling(self.bot)
         except Exception as e:
             log.error(f"Bot xatosi: {e}")
@@ -2020,18 +2095,18 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
 def print_banner():
     sys_info = get_system_info()
     banner = f"""
-{'=' * 55}
-{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v6.0 (Aiogram)
-{'=' * 55}
+{'=' * 60}
+{' ' * 15}{EMOJI_ROCKET} BOT DEPLOY BOT v7.0
+{'=' * 60}
 
-  Versiya:      6.0 (Baza saqlanadi va qayta tiklanadi)
-  Sana:         2026-04-06
+  Versiya:      7.0 (Baza saqlanadi va qayta tiklanadi)
+  Sana:         2026-04-07
   Platform:     {sys_info['platform']} {sys_info['platform_release']}
   Python:       {sys_info['python_version']}
 
-{'=' * 55}
+{'=' * 60}
   XUSUSIYATLAR:
-{'=' * 55}
+{'=' * 60}
   {EMOJI_CHECK} Aiogram va Telebot bilan ishlaydi
   {EMOJI_CHECK} Oddiy .py fayl qabul qiladi
   {EMOJI_CHECK} Kod tahlili va sifat bahosi
@@ -2039,20 +2114,30 @@ def print_banner():
   {EMOJI_CHECK} Avtomatik qayta ishga tushirish
   {EMOJI_CHECK} Bot shablonlari (Aiogram + Telebot)
   {EMOJI_CHECK} Statistika va monitoring
-  {EMOJI_CHECK} Server restartda avvalgi botlar avtomatik tiklanadi ✅
-  {EMOJI_CHECK} Baza ma'lumotlari saqlanadi va qayta tiklanadi ✅
-  {EMOJI_CHECK} Webhook avtomatik o'chiriladi
+  {EMOJI_CHECK} ✅ Server restartda avvalgi botlar avtomatik tiklanadi
+  {EMOJI_CHECK} ✅ Baza ma'lumotlari saqlanadi va qayta tiklanadi
+  {EMOJI_CHECK} ✅ Webhook avtomatik o'chiriladi
   {EMOJI_SAVE} Backup qilish (/backup)
+  {EMOJI_DATABASE} Bazani optimallashtirish (/vacuum)
 
-{'=' * 55}
+{'=' * 60}
+  SAQLASH MEXANIZMI:
+{'=' * 60}
+  ✅ Har bir deploy qilingan bot bazada saqlanadi
+  ✅ Bot fayllari deployed_bots/ papkasida saqlanadi
+  ✅ Server restartda barcha botlar avtomatik tiklanadi
+  ✅ Anime bot kabi botlarning ichki ma'lumotlari saqlanadi
+
+{'=' * 60}
   SOZLAMALAR:
-{'=' * 55}
+{'=' * 60}
   Maksimal fayl:  {format_size(MAX_FILE_SIZE)}
   Auto-restart:   {'Yoq' if AUTO_RESTART else 'Yo' + "'q"}
   Max restart:    {MAX_RESTART_ATTEMPTS} ta
   DB:             deploy_bots.db
+  DEPLOY_DIR:     {DEPLOY_DIR}/
 
-{'=' * 55}
+{'=' * 60}
 """
     print(banner)
 
