@@ -1,8 +1,8 @@
 # ================================================================
 # ANICITY RASMIY BOT - TO'LIQ TUZATILGAN VERSIYA
+# Majburiy obuna: @AniCity_Rasmiy (system_animelar_bot uslubida)
 # ================================================================
 # Muallif: @s_2akk
-# Kanal: @AniCity_Rasmiy
 # ================================================================
 
 import asyncio
@@ -14,11 +14,11 @@ import io
 from datetime import datetime
 from typing import Tuple, List, Dict, Any, Callable, Awaitable
 
-from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton, TelegramObject, FSInputFile, BufferedInputFile
+    ReplyKeyboardMarkup, KeyboardButton, FSInputFile, BufferedInputFile
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -29,7 +29,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # ================================================================
 BOT_TOKEN = "8545654766:AAHc9XBWMsgQWxibBXcPN44vu1rZ6AILlMg"
 ADMINS = [5675087151, 6498527560]
-MAIN_CHANNEL = "@AniCity_Rasmiy"
+MAIN_CHANNEL = "@AniCity_Rasmiy"  # Majburiy kanal (system_animelar_bot uslubida)
 AUTHOR_USERNAME = "@s_2akk"
 AUTHOR_LINK = "https://t.me/S_2ak"
 SUPPORT_USERNAME = "@s_2akk"
@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS admins (
 )
 ''')
 
-# Majburiy kanallar jadvali
+# Majburiy kanallar jadvali (faqat bitta kanal uchun, lekin kelajak uchun)
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS forced_channels (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,7 +119,13 @@ for admin_id in ADMINS:
     cursor.execute("INSERT OR IGNORE INTO admins (user_id, added_by, added_at) VALUES (?, ?, ?)",
                    (admin_id, admin_id, now))
 conn.commit()
+
+# Asosiy kanalni majburiy kanallar ro'yxatiga qo'shish (agar mavjud bo'lmasa)
+cursor.execute("INSERT OR IGNORE INTO forced_channels (channel_username, is_active) VALUES (?, ?)", (MAIN_CHANNEL, 1))
+conn.commit()
+
 print("✅ Database muvaffaqiyatli yuklandi!")
+print(f"📢 Majburiy kanal: {MAIN_CHANNEL}")
 
 # ================================================================
 # 3-BOT
@@ -138,124 +144,28 @@ def get_admin_image():
     return FSInputFile(ADMIN_IMAGE_PATH) if os.path.exists(ADMIN_IMAGE_PATH) else None
 
 # ================================================================
-# 5-MAJBURIY A'ZOLIK FUNKSIYALARI (TUZATILGAN - ADMIN BO'LMASA HAM ISHLAYDI)
+# 5-MAJBURIY OBUNA FUNKSIYASI (system_animelar_bot uslubida)
 # ================================================================
-async def check_subscription(user_id: int) -> Tuple[bool, List[str]]:
-    """Foydalanuvchi barcha aktiv majburiy kanallarga a'zoligini tekshiradi.
-    Bot admin bo'lmasa ham PUBLIC kanallarni tekshira oladi.
-    PRIVATE kanallarda esa tekshiruvni o'tkazib yuboradi."""
-    cursor.execute("SELECT id, channel_username FROM forced_channels WHERE is_active = 1")
-    channels = cursor.fetchall()
-    if not channels:
-        return True, []
+async def is_subscribed(user_id: int) -> bool:
+    """Foydalanuvchi asosiy kanalga a'zoligini tekshiradi"""
+    try:
+        member = await bot.get_chat_member(chat_id=MAIN_CHANNEL, user_id=user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except Exception as e:
+        print(f"⚠️ Kanal tekshirish xatosi: {e}")
+        return False
 
-    not_subscribed = []
-
-    for ch_id, channel_username in channels:
-        clean_channel = channel_username.replace('@', '').strip()
-        if not clean_channel:
-            continue
-
-        try:
-            # PUBLIC kanalda bot admin bo'lmasa ham ishlaydi
-            member = await bot.get_chat_member(chat_id=f"@{clean_channel}", user_id=user_id)
-            if member.status in ['left', 'kicked']:
-                not_subscribed.append(f"@{clean_channel}")
-                
-        except Exception as e:
-            error_msg = str(e).lower()
-            
-            # "member list is inaccessible" - bu kanal PRIVATE yoki bot a'zo emas
-            if "member list is inaccessible" in error_msg:
-                # PRIVATE kanal - bot a'zo bo'lishi kerak
-                # Avval bot kanalda a'zomi tekshirib ko'ramiz
-                try:
-                    bot_member = await bot.get_chat_member(chat_id=f"@{clean_channel}", user_id=bot.id)
-                    if bot_member.status == 'left':
-                        # Bot kanalda emas -> bu kanalni o'tkazib yuboramiz (o'chirmaymiz)
-                        print(f"⚠️ Bot {channel_username} kanalida emas, tekshiruv o'tkazib yuborildi.")
-                    else:
-                        # Bot a'zo lekin admin emas - PRIVATE kanal
-                        # Bu holda foydalanuvchini tekshirib bo'lmaydi
-                        # SHUNING UCHUN: foydalanuvchini a'zo deb hisoblaymiz (o'tkazib yuboramiz)
-                        print(f"ℹ️ {channel_username} PRIVATE kanal, bot admin emas. Tekshiruv o'tkazib yuborildi.")
-                except:
-                    # Bot kanal haqida ma'lumot ololmaydi -> o'tkazib yuboramiz
-                    print(f"⚠️ {channel_username} kanali haqida ma'lumot olib bo'lmadi, o'tkazib yuborildi.")
-                    
-            elif "chat not found" in error_msg or "invalid username" in error_msg:
-                # Kanal topilmadi -> o'tkazib yuboramiz (o'chirmaymiz)
-                print(f"⚠️ Kanal {channel_username} topilmadi, tekshiruv o'tkazib yuborildi.")
-                
-            elif "bot is not a member" in error_msg:
-                # Bot kanalda emas -> o'tkazib yuboramiz
-                print(f"⚠️ Bot {channel_username} kanaliga a'zo emas, tekshiruv o'tkazib yuborildi.")
-                
-            else:
-                # Boshqa xatolik -> o'tkazib yuboramiz
-                print(f"⚠️ Kanal tekshirish xatosi {channel_username}: {e}")
-
-    return len(not_subscribed) == 0, not_subscribed
-
-async def get_subscription_keyboard(not_subscribed: List[str]) -> InlineKeyboardMarkup:
-    """A'zo bo'lmagan kanallar uchun tugmalar"""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    for ch in not_subscribed:
-        clean = ch.replace('@', '')
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(text=f"📢 {ch}", url=f"https://t.me/{clean}")
-        ])
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_sub")])
-    return keyboard
+async def get_subscription_keyboard():
+    """Majburiy kanal uchun tugmalar"""
+    clean_channel = MAIN_CHANNEL.replace('@', '')
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📢 {MAIN_CHANNEL}", url=f"https://t.me/{clean_channel}")],
+        [InlineKeyboardButton(text="✅ A'zolikni tekshirish", callback_data="check_sub")]
+    ])
 
 # ================================================================
-# 6-MIDDLEWARE
+# 6-STATE'LAR
 # ================================================================
-class SubscriptionMiddleware(BaseMiddleware):
-    """Barcha handlerlarni majburiy a'zolikka tekshiradi"""
-    async def __call__(
-        self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
-        event: TelegramObject,
-        data: Dict[str, Any]
-    ) -> Any:
-        user_id = None
-        if isinstance(event, Message):
-            user_id = event.from_user.id
-        elif isinstance(event, CallbackQuery):
-            user_id = event.from_user.id
-        else:
-            return await handler(event, data)
-
-        # Istisnolar: /start va check_sub
-        if isinstance(event, Message):
-            if event.text and event.text.startswith("/start"):
-                return await handler(event, data)
-        elif isinstance(event, CallbackQuery):
-            if event.data == "check_sub":
-                return await handler(event, data)
-
-        subscribed, not_subscribed = await check_subscription(user_id)
-        if not subscribed:
-            text = "❌ Botdan foydalanish uchun quyidagi kanallarga a'zo bo'ling:\n\n" + "\n".join(not_subscribed)
-            keyboard = await get_subscription_keyboard(not_subscribed)
-            if isinstance(event, Message):
-                await event.answer(text, reply_markup=keyboard, parse_mode="HTML")
-            else:
-                await event.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
-            return
-        return await handler(event, data)
-
-# Middleware-ni ro'yxatdan o'tkazish
-dp.message.middleware(SubscriptionMiddleware())
-dp.callback_query.middleware(SubscriptionMiddleware())
-
-# ================================================================
-# 7-STATE'LAR
-# ================================================================
-class ForcedChannelState(StatesGroup):
-    waiting_for_channel = State()
-
 class AddMediaState(StatesGroup):
     type = State()
     name = State()
@@ -318,8 +228,11 @@ class CodeSearchState(StatesGroup):
 class ImageSearchState(StatesGroup):
     waiting_for_image = State()
 
+class ForcedChannelState(StatesGroup):
+    waiting_for_channel = State()
+
 # ================================================================
-# 8-TUGMALAR
+# 7-TUGMALAR
 # ================================================================
 def start_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -338,7 +251,7 @@ def admin_menu():
         [KeyboardButton(text="➕ Media Qo'shish"), KeyboardButton(text="➕ Qism Qo'shish")],
         [KeyboardButton(text="➕ Ko'p Qism Qo'shish"), KeyboardButton(text="✏️ Media Tahrirlash")],
         [KeyboardButton(text="✏️ Qismni Tahrirlash"), KeyboardButton(text="📊 Statistika")],
-        [KeyboardButton(text="📢 Xabar Yuborish"), KeyboardButton(text="🔗 Majburiy A'zo")],
+        [KeyboardButton(text="📢 Xabar Yuborish"), KeyboardButton(text="🔗 Majburiy Kanal")],
         [KeyboardButton(text="👑 Admin Qo'shish"), KeyboardButton(text="📨 Post Qilish")],
         [KeyboardButton(text="🎬 Qismni Post Qilish"), KeyboardButton(text="🔙 Asosiy menyu")]
     ], resize_keyboard=True)
@@ -352,32 +265,10 @@ def admin_manage_buttons():
 
 def forced_channel_buttons():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="forced_add")],
-        [InlineKeyboardButton(text="❌ Kanal o'chirish", callback_data="forced_remove")],
-        [InlineKeyboardButton(text="📋 Kanallar ro'yxati", callback_data="forced_list")],
+        [InlineKeyboardButton(text="📢 Majburiy kanalni o'zgartirish", callback_data="change_channel")],
+        [InlineKeyboardButton(text="📋 Joriy kanal", callback_data="show_channel")],
         [InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_admin_reply")]
     ])
-
-def forced_channel_list_keyboard(page=0):
-    cursor.execute("SELECT id, channel_username, is_active FROM forced_channels ORDER BY channel_username")
-    channels = cursor.fetchall()
-    per_page = 10
-    start = page * per_page
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    for ch_id, channel, active in channels[start:start+per_page]:
-        status = "✅" if active else "❌"
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(text=f"{status} {channel}", callback_data=f"forced_del_{ch_id}")
-        ])
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️", callback_data=f"forced_page_{page-1}"))
-    if start + per_page < len(channels):
-        nav_buttons.append(InlineKeyboardButton(text="➡️", callback_data=f"forced_page_{page+1}"))
-    if nav_buttons:
-        keyboard.inline_keyboard.append(nav_buttons)
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="🔙 Ortga", callback_data="back_to_forced_menu")])
-    return keyboard
 
 def media_list_keyboard(media_type=None, page=0):
     builder = InlineKeyboardBuilder()
@@ -462,7 +353,7 @@ def status_keyboard(media_id):
     ])
 
 # ================================================================
-# 9-YORDAMCHI FUNKSIYALAR
+# 8-YORDAMCHI FUNKSIYALAR
 # ================================================================
 def is_admin(user_id: int) -> bool:
     cursor.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
@@ -557,12 +448,26 @@ async def view_media_by_id(message: Message, media_id: int):
         await safe_send_message(message.chat.id, "❌ Xatolik yuz berdi!")
 
 # ================================================================
-# 10-START HANDLER
+# 9-START HANDLER (MAJBURIY OBUNA BILAN)
 # ================================================================
 @dp.message(Command("start"))
 async def start(message: Message):
     await add_user(message.from_user)
     
+    # MAJBURIY OBUNA TEKSHIRUVI (system_animelar_bot uslubida)
+    subscribed = await is_subscribed(message.from_user.id)
+    
+    if not subscribed:
+        keyboard = await get_subscription_keyboard()
+        welcome_text = (
+            f"❌ <b>Botdan foydalanish uchun quyidagi kanalga a'zo bo'ling:</b>\n\n"
+            f"📢 {MAIN_CHANNEL}\n\n"
+            f"A'zo bo'lgandan so'ng ✅ <b>A'zolikni tekshirish</b> tugmasini bosing."
+        )
+        await safe_send_message(message.chat.id, welcome_text, reply_markup=keyboard, parse_mode="HTML")
+        return
+    
+    # A'zo bo'lganlar uchun normal start
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("code_"):
         code = args[1].replace("code_", "")
@@ -616,26 +521,23 @@ async def start(message: Message):
 
 @dp.callback_query(F.data == "check_sub")
 async def check_sub_callback(callback: CallbackQuery):
-    subscribed, not_subscribed = await check_subscription(callback.from_user.id)
+    subscribed = await is_subscribed(callback.from_user.id)
+    
     if subscribed:
         await callback.message.delete()
         start_image = get_start_image()
         welcome_text = (
             "🎬 <b>AniCity Rasmiy Bot</b> 🎬\n\n"
-            "✅ Siz barcha kanallarga a'zo bo'ldingiz!\n"
-            "Endi botdan foydalanishingiz mumkin."
+            "✅ <b>Siz kanalga a'zo bo'ldingiz!</b>\n"
+            "Endi botdan foydalanishingiz mumkin.\n\n"
+            "⬇️ Quyidagi tugmalardan birini tanlang: ⬇️"
         )
         if start_image:
             await safe_send_photo(callback.from_user.id, photo=start_image, caption=welcome_text, reply_markup=start_menu(), parse_mode="HTML")
         else:
             await safe_send_message(callback.from_user.id, welcome_text, reply_markup=start_menu(), parse_mode="HTML")
     else:
-        text = "❌ Hali ham quyidagi kanallarga a'zo emassiz:\n\n" + "\n".join(not_subscribed)
-        keyboard = await get_subscription_keyboard(not_subscribed)
-        try:
-            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-        except:
-            await safe_send_message(callback.from_user.id, text, reply_markup=keyboard, parse_mode="HTML")
+        await callback.answer("❌ Siz hali kanalga a'zo bo'lmagansiz!\nIltimos, avval a'zo bo'ling.", show_alert=True)
     await callback.answer()
 
 @dp.callback_query(F.data == "back_to_start")
@@ -665,7 +567,7 @@ async def back_to_start(callback: CallbackQuery):
     await callback.answer()
 
 # ================================================================
-# 11-KOD ORQALI QIDIRUV
+# 10-KOD ORQALI QIDIRUV
 # ================================================================
 @dp.callback_query(F.data == "search_by_code")
 async def search_by_code_start(callback: CallbackQuery, state: FSMContext):
@@ -700,7 +602,7 @@ async def search_by_code(message: Message, state: FSMContext):
     await state.clear()
 
 # ================================================================
-# 12-NOM BO'YICHA QIDIRUV
+# 11-NOM BO'YICHA QIDIRUV
 # ================================================================
 @dp.callback_query(F.data == "search_anime")
 async def search_anime_start(callback: CallbackQuery, state: FSMContext):
@@ -754,7 +656,7 @@ async def search_media_query(message: Message, state: FSMContext):
     await state.clear()
 
 # ================================================================
-# 13-RASM ORQALI QIDIRUV
+# 12-RASM ORQALI QIDIRUV
 # ================================================================
 @dp.callback_query(F.data == "search_image")
 async def search_image_start(callback: CallbackQuery, state: FSMContext):
@@ -781,7 +683,6 @@ async def search_by_image(message: Message, state: FSMContext):
     
     await message.answer("🖼 Rasm qabul qilindi! 🔍 Qidiruv boshlanmoqda...")
     
-    # Rasm orqali qidiruv uchun trace.moe API
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     file_bytes = await bot.download_file(file.file_path)
@@ -841,7 +742,7 @@ async def search_by_image_invalid(message: Message, state: FSMContext):
     await message.answer("❌ Iltimos, rasm yuboring!")
 
 # ================================================================
-# 14-GUIDE, ADVERTISEMENT, LIST ALL
+# 13-GUIDE, ADVERTISEMENT, LIST ALL
 # ================================================================
 @dp.callback_query(F.data == "guide")
 async def guide_start(callback: CallbackQuery):
@@ -909,7 +810,7 @@ async def list_all_start(callback: CallbackQuery):
     await callback.answer()
 
 # ================================================================
-# 15-MEDIA KO'RISH
+# 14-MEDIA KO'RISH
 # ================================================================
 @dp.callback_query(lambda c: c.data.startswith("view_media_"))
 async def view_media(callback: CallbackQuery):
@@ -967,7 +868,7 @@ async def view_media(callback: CallbackQuery):
         await callback.answer("Xatolik yuz berdi!")
 
 # ================================================================
-# 16-QISMLARNI KO'RISH VA TOMOSHA QILISH
+# 15-QISMLARNI KO'RISH VA TOMOSHA QILISH
 # ================================================================
 @dp.callback_query(lambda c: c.data.startswith("watch_parts_") and not c.data.startswith("watch_parts_page_"))
 async def watch_parts(callback: CallbackQuery):
@@ -1034,7 +935,7 @@ async def watch_parts_page(callback: CallbackQuery):
         await callback.answer("Xatolik yuz berdi!")
 
 # ================================================================
-# 17-ADMIN PANEL
+# 16-ADMIN PANEL
 # ================================================================
 @dp.callback_query(F.data == "admin_panel")
 async def admin_panel_callback(callback: CallbackQuery):
@@ -1047,7 +948,8 @@ async def admin_panel_callback(callback: CallbackQuery):
         f"👑 Adminlar: {cursor.execute('SELECT COUNT(*) FROM admins').fetchone()[0]}\n"
         f"🎬 Media: {cursor.execute('SELECT COUNT(*) FROM media').fetchone()[0]}\n"
         f"📹 Qismlar: {cursor.execute('SELECT COUNT(*) FROM parts').fetchone()[0]}\n"
-        f"👥 Foydalanuvchilar: {cursor.execute('SELECT COUNT(*) FROM users').fetchone()[0]}\n\n"
+        f"👥 Foydalanuvchilar: {cursor.execute('SELECT COUNT(*) FROM users').fetchone()[0]}\n"
+        f"📢 Majburiy kanal: {MAIN_CHANNEL}\n\n"
         "⬇️ Quyidagi tugmalardan foydalaning:"
     )
     try:
@@ -1096,7 +998,8 @@ async def back_to_admin_reply(callback: CallbackQuery):
         f"👑 Adminlar: {cursor.execute('SELECT COUNT(*) FROM admins').fetchone()[0]}\n"
         f"🎬 Media: {cursor.execute('SELECT COUNT(*) FROM media').fetchone()[0]}\n"
         f"📹 Qismlar: {cursor.execute('SELECT COUNT(*) FROM parts').fetchone()[0]}\n"
-        f"👥 Foydalanuvchilar: {cursor.execute('SELECT COUNT(*) FROM users').fetchone()[0]}\n\n"
+        f"👥 Foydalanuvchilar: {cursor.execute('SELECT COUNT(*) FROM users').fetchone()[0]}\n"
+        f"📢 Majburiy kanal: {MAIN_CHANNEL}\n\n"
         "⬇️ Quyidagi tugmalardan foydalaning:"
     )
     if admin_image:
@@ -1106,7 +1009,7 @@ async def back_to_admin_reply(callback: CallbackQuery):
     await callback.answer()
 
 # ================================================================
-# 18-MEDIA QO'SHISH
+# 17-MEDIA QO'SHISH
 # ================================================================
 @dp.message(F.text == "➕ Media Qo'shish")
 async def add_media_start(message: Message, state: FSMContext):
@@ -1226,7 +1129,7 @@ async def add_media_quality(message: Message, state: FSMContext):
     await state.clear()
 
 # ================================================================
-# 19-QISM QO'SHISH
+# 18-QISM QO'SHISH
 # ================================================================
 @dp.message(F.text == "➕ Qism Qo'shish")
 async def add_part_start(message: Message, state: FSMContext):
@@ -1287,7 +1190,7 @@ async def add_part_caption(message: Message, state: FSMContext):
     await state.clear()
 
 # ================================================================
-# 20-KO'P QISM QO'SHISH
+# 19-KO'P QISM QO'SHISH
 # ================================================================
 @dp.message(F.text == "➕ Ko'p Qism Qo'shish")
 async def add_multiple_parts_start(message: Message, state: FSMContext):
@@ -1356,7 +1259,7 @@ async def add_multiple_parts_done(message: Message, state: FSMContext):
     await state.clear()
 
 # ================================================================
-# 21-MEDIA TAHRIRLASH
+# 20-MEDIA TAHRIRLASH
 # ================================================================
 @dp.message(F.text == "✏️ Media Tahrirlash")
 async def edit_media_start(message: Message, state: FSMContext):
@@ -1496,7 +1399,7 @@ async def edit_media_image_photo(message: Message, state: FSMContext):
     await state.clear()
 
 # ================================================================
-# 22-QISMNI TAHRIRLASH
+# 21-QISMNI TAHRIRLASH
 # ================================================================
 @dp.message(F.text == "✏️ Qismni Tahrirlash")
 async def edit_part_start(message: Message, state: FSMContext):
@@ -1584,7 +1487,7 @@ async def edit_part_value(message: Message, state: FSMContext):
     await state.clear()
 
 # ================================================================
-# 23-STATISTIKA
+# 22-STATISTIKA
 # ================================================================
 @dp.message(F.text == "📊 Statistika")
 async def show_stats(message: Message):
@@ -1597,7 +1500,7 @@ async def show_stats(message: Message):
     await message.answer(f"📊 <b>Statistika</b>\n\n👥 Foydalanuvchilar: {users}\n🎬 Media: {media}\n📹 Qismlar: {parts}\n👁️ Ko'rishlar: {views}\n👑 Adminlar: {admins}", parse_mode="HTML")
 
 # ================================================================
-# 24-XABAR YUBORISH
+# 23-XABAR YUBORISH
 # ================================================================
 @dp.message(F.text == "📢 Xabar Yuborish")
 async def broadcast_start(message: Message, state: FSMContext):
@@ -1624,126 +1527,48 @@ async def broadcast_send(message: Message, state: FSMContext):
     await state.clear()
 
 # ================================================================
-# 25-MAJBURIY KANAL BOSHQARUVI (ADMIN PANEL)
+# 24-MAJBURIY KANAL BOSHQARUVI (ADMIN PANEL)
 # ================================================================
-@dp.message(F.text == "🔗 Majburiy A'zo")
-async def forced_subscribe_menu(message: Message, state: FSMContext):
+@dp.message(F.text == "🔗 Majburiy Kanal")
+async def forced_channel_menu(message: Message):
     if not is_admin(message.from_user.id): return
-    await message.answer("🔗 Majburiy a'zolik boshqaruvi:", reply_markup=forced_channel_buttons(), parse_mode="HTML")
+    await message.answer(
+        f"📢 <b>Joriy majburiy kanal:</b> {MAIN_CHANNEL}\n\n"
+        f"Bu kanalga a'zo bo'lmagan foydalanuvchilar botdan foydalana olmaydi.\n\n"
+        f"Kanalni o'zgartirish uchun admin bilan bog'lanib, kodni yangilash kerak.",
+        reply_markup=forced_channel_buttons(),
+        parse_mode="HTML"
+    )
 
-@dp.callback_query(F.data == "forced_add")
-async def forced_add_start(callback: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "show_channel")
+async def show_channel(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q!")
         return
-    await state.set_state(ForcedChannelState.waiting_for_channel)
-    try:
-        await callback.message.edit_text("➕ Kanal username yoki linkini yuboring:\nMasalan: @kanal yoki https://t.me/kanal\n\n⚠️ Eslatma: PUBLIC kanallar uchun botni oddiy a'zo qilish kifoya. PRIVATE kanallar uchun bot admin bo'lishi kerak.")
-    except:
-        await safe_send_message(callback.from_user.id, "➕ Kanal username yoki linkini yuboring:\nMasalan: @kanal yoki https://t.me/kanal\n\n⚠️ Eslatma: PUBLIC kanallar uchun botni oddiy a'zo qilish kifoya. PRIVATE kanallar uchun bot admin bo'lishi kerak.")
+    await callback.message.edit_text(
+        f"📢 <b>Joriy majburiy kanal:</b> {MAIN_CHANNEL}\n\n"
+        f"Bu kanalga a'zo bo'lmagan foydalanuvchilar botdan foydalana olmaydi.",
+        parse_mode="HTML"
+    )
     await callback.answer()
 
-@dp.message(ForcedChannelState.waiting_for_channel)
-async def forced_add_channel(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    
-    channel_input = message.text.strip()
-    if channel_input.startswith("https://t.me/"):
-        parts = channel_input.split("/")
-        username = parts[-1].split("?")[0]
-        channel = f"@{username}"
-    elif channel_input.startswith("@"):
-        channel = channel_input
-    else:
-        channel = f"@{channel_input}"
-    
-    clean = channel.replace("@", "")
-    try:
-        await bot.get_chat(f"@{clean}")
-        cursor.execute("INSERT INTO forced_channels (channel_username, is_active) VALUES (?, ?)", (channel, 1))
-        conn.commit()
-        await message.answer(f"✅ {channel} majburiy a'zolik ro'yxatiga qo'shildi!\n\n⚠️ Eslatma: Botni kanalga a'zo qiling (PUBLIC kanal bo'lsa oddiy a'zo kifoya, PRIVATE bo'lsa admin bo'lishi kerak)")
-    except Exception as e:
-        await message.answer(f"❌ Xatolik: Kanal topilmadi yoki bot a'zo emas.\n{e}")
-    await state.clear()
-
-@dp.callback_query(F.data == "forced_remove")
-async def forced_remove_list(callback: CallbackQuery):
+@dp.callback_query(F.data == "change_channel")
+async def change_channel_info(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q!")
         return
-    cursor.execute("SELECT id, channel_username, is_active FROM forced_channels ORDER BY channel_username")
-    channels = cursor.fetchall()
-    if not channels:
-        try:
-            await callback.message.edit_text("📭 Hozircha majburiy kanal yo'q.")
-        except:
-            await safe_send_message(callback.from_user.id, "📭 Hozircha majburiy kanal yo'q.")
-        await callback.answer()
-        return
-    try:
-        await callback.message.edit_text("❌ O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=forced_channel_list_keyboard())
-    except:
-        await safe_send_message(callback.from_user.id, "❌ O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=forced_channel_list_keyboard())
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("forced_del_"))
-async def forced_remove_channel(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Ruxsat yo'q!")
-        return
-    ch_id = int(callback.data.split("_")[2])
-    cursor.execute("DELETE FROM forced_channels WHERE id = ?", (ch_id,))
-    conn.commit()
-    try:
-        await callback.message.edit_text("✅ Kanal o'chirildi!")
-    except:
-        await safe_send_message(callback.from_user.id, "✅ Kanal o'chirildi!")
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("forced_page_"))
-async def forced_page_callback(callback: CallbackQuery):
-    page = int(callback.data.split("_")[2])
-    try:
-        await callback.message.edit_text("❌ O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=forced_channel_list_keyboard(page))
-    except:
-        await safe_send_message(callback.from_user.id, "❌ O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=forced_channel_list_keyboard(page))
-    await callback.answer()
-
-@dp.callback_query(F.data == "forced_list")
-async def forced_list(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Ruxsat yo'q!")
-        return
-    cursor.execute("SELECT channel_username, is_active FROM forced_channels ORDER BY channel_username")
-    channels = cursor.fetchall()
-    if not channels:
-        text = "📭 Majburiy kanallar ro'yxati bo'sh."
-    else:
-        text = "📋 Majburiy kanallar:\n\n"
-        for ch_username, active in channels:
-            status = "✅ aktiv" if active else "❌ noaktiv"
-            text += f"• {ch_username} ({status})\n"
-        text += "\n⚠️ Eslatma: PUBLIC kanallar bot oddiy a'zo bo'lsa ishlaydi. PRIVATE kanallar uchun bot admin bo'lishi kerak."
-    try:
-        await callback.message.edit_text(text)
-    except:
-        await safe_send_message(callback.from_user.id, text)
-    await callback.answer()
-
-@dp.callback_query(F.data == "back_to_forced_menu")
-async def back_to_forced_menu(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    try:
-        await callback.message.edit_text("🔗 Majburiy a'zolik boshqaruvi:", reply_markup=forced_channel_buttons(), parse_mode="HTML")
-    except:
-        await safe_send_message(callback.from_user.id, "🔗 Majburiy a'zolik boshqaruvi:", reply_markup=forced_channel_buttons(), parse_mode="HTML")
+    await callback.message.edit_text(
+        f"⚠️ <b>Kanalni o'zgartirish</b>\n\n"
+        f"Majburiy kanalni o'zgartirish uchun quyidagi o'zgaruvchini kodda o'zgartiring:\n\n"
+        f"<code>MAIN_CHANNEL = \"{MAIN_CHANNEL}\"</code>\n\n"
+        f"Yangi kanal username bilan almashtiring va botni qayta ishga tushiring.\n\n"
+        f"<b>Muhim:</b> Bot yangi kanalga a'zo bo'lishi kerak!",
+        parse_mode="HTML"
+    )
     await callback.answer()
 
 # ================================================================
-# 26-ADMIN QO'SHISH/CHIQARISH
+# 25-ADMIN QO'SHISH/CHIQARISH
 # ================================================================
 @dp.message(F.text == "👑 Admin Qo'shish")
 async def admin_manage(message: Message, state: FSMContext):
@@ -1798,7 +1623,7 @@ async def admin_manage_user_id(message: Message, state: FSMContext):
             conn.commit()
             await message.answer(f"✅ {user_id} admin qo'shildi!" if cursor.rowcount > 0 else f"⚠️ {user_id} allaqachon admin!")
             try:
-                await bot.send_message(user_id, "🎉 Siz admin etib tayinlandingiz!\nAdmin panelga /admin orqali kiring.")
+                await bot.send_message(user_id, "🎉 Siz admin etib tayinlandingiz!\nAdmin panelga /start orqali kiring.")
             except:
                 pass
         else:
@@ -1813,7 +1638,7 @@ async def admin_manage_user_id(message: Message, state: FSMContext):
     await state.clear()
 
 # ================================================================
-# 27-POST QILISH
+# 26-POST QILISH
 # ================================================================
 @dp.message(F.text == "📨 Post Qilish")
 async def post_start(message: Message, state: FSMContext):
@@ -1981,7 +1806,7 @@ async def post_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # ================================================================
-# 28-QISMNI POST QILISH
+# 27-QISMNI POST QILISH
 # ================================================================
 @dp.message(F.text == "🎬 Qismni Post Qilish")
 async def part_post_start(message: Message, state: FSMContext):
@@ -2162,7 +1987,7 @@ async def part_post_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # ================================================================
-# 29-BOSHQA CALLBACKLAR
+# 28-BOSHQA CALLBACKLAR
 # ================================================================
 @dp.callback_query(F.data == "cancel_post")
 async def cancel_post(callback: CallbackQuery, state: FSMContext):
@@ -2190,7 +2015,8 @@ async def cancel_add_admin(callback: CallbackQuery, state: FSMContext):
         f"👑 Adminlar: {cursor.execute('SELECT COUNT(*) FROM admins').fetchone()[0]}\n"
         f"🎬 Media: {cursor.execute('SELECT COUNT(*) FROM media').fetchone()[0]}\n"
         f"📹 Qismlar: {cursor.execute('SELECT COUNT(*) FROM parts').fetchone()[0]}\n"
-        f"👥 Foydalanuvchilar: {cursor.execute('SELECT COUNT(*) FROM users').fetchone()[0]}\n\n"
+        f"👥 Foydalanuvchilar: {cursor.execute('SELECT COUNT(*) FROM users').fetchone()[0]}\n"
+        f"📢 Majburiy kanal: {MAIN_CHANNEL}\n\n"
         "⬇️ Quyidagi tugmalardan foydalaning:"
     )
     if admin_image:
@@ -2237,7 +2063,7 @@ async def back_to_parts_callback(callback: CallbackQuery):
     await callback.answer()
 
 # ================================================================
-# 30-UNKNOWN HANDLER
+# 29-UNKNOWN HANDLER
 # ================================================================
 @dp.message()
 async def handle_unknown(message: Message):
@@ -2245,20 +2071,21 @@ async def handle_unknown(message: Message):
     pass
 
 # ================================================================
-# 31-BOTNI ISHGA TUSHIRISH
+# 30-BOTNI ISHGA TUSHIRISH
 # ================================================================
 async def main():
     print("=" * 60)
-    print("🤖 ANICITY RASMIY BOT - TO'LIQ TUZATILGAN VERSIYA")
+    print("🤖 ANICITY RASMIY BOT - TO'LIQ VERSIYA")
     print("=" * 60)
     print(f"👑 Adminlar: {ADMINS}")
-    print(f"📢 Asosiy kanal: {MAIN_CHANNEL}")
+    print(f"📢 Majburiy kanal: {MAIN_CHANNEL}")
     print(f"👨‍💻 Muallif: {AUTHOR_USERNAME} ({AUTHOR_LINK})")
     print(f"🆘 Yordam: {SUPPORT_USERNAME} ({SUPPORT_LINK})")
     print("=" * 60)
     print("✅ Barcha modullar muvaffaqiyatli yuklandi!")
     print("📌 Bot to'liq ishga tushdi!")
-    print("⚠️ Eslatma: Majburiy kanallar PUBLIC bo'lishi kerak yoki bot ADMIN bo'lishi kerak!")
+    print("⚠️ Eslatma: Foydalanuvchilar botdan foydalanish uchun")
+    print(f"   {MAIN_CHANNEL} kanaliga a'zo bo'lishlari kerak!")
     print("=" * 60)
     
     try:
