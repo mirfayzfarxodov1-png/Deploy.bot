@@ -1,5 +1,5 @@
 # ================================================================
-# ANICITY RASMIY BOT - TO'LIQ VERSIYA
+# ANICITY RASMIY BOT - TO'LIQ TUZATILGAN VERSIYA
 # ================================================================
 # Muallif: @s_2akk
 # Kanal: @AniCity_Rasmiy
@@ -138,40 +138,63 @@ def get_admin_image():
     return FSInputFile(ADMIN_IMAGE_PATH) if os.path.exists(ADMIN_IMAGE_PATH) else None
 
 # ================================================================
-# 5-MAJBURIY A'ZOLIK FUNKSIYALARI
+# 5-MAJBURIY A'ZOLIK FUNKSIYALARI (TUZATILGAN - ADMIN BO'LMASA HAM ISHLAYDI)
 # ================================================================
 async def check_subscription(user_id: int) -> Tuple[bool, List[str]]:
-    """Foydalanuvchi barcha aktiv majburiy kanallarga a'zoligini tekshiradi"""
+    """Foydalanuvchi barcha aktiv majburiy kanallarga a'zoligini tekshiradi.
+    Bot admin bo'lmasa ham PUBLIC kanallarni tekshira oladi.
+    PRIVATE kanallarda esa tekshiruvni o'tkazib yuboradi."""
     cursor.execute("SELECT id, channel_username FROM forced_channels WHERE is_active = 1")
     channels = cursor.fetchall()
     if not channels:
         return True, []
 
     not_subscribed = []
+
     for ch_id, channel_username in channels:
         clean_channel = channel_username.replace('@', '').strip()
         if not clean_channel:
-            cursor.execute("UPDATE forced_channels SET is_active = 0 WHERE id = ?", (ch_id,))
-            conn.commit()
             continue
 
         try:
+            # PUBLIC kanalda bot admin bo'lmasa ham ishlaydi
             member = await bot.get_chat_member(chat_id=f"@{clean_channel}", user_id=user_id)
             if member.status in ['left', 'kicked']:
                 not_subscribed.append(f"@{clean_channel}")
+                
         except Exception as e:
             error_msg = str(e).lower()
-            if "chat not found" in error_msg or "invalid username" in error_msg:
-                cursor.execute("UPDATE forced_channels SET is_active = 0 WHERE id = ?", (ch_id,))
-                conn.commit()
-                logging.warning(f"⚠️ Kanal {channel_username} topilmadi, o'chirildi.")
+            
+            # "member list is inaccessible" - bu kanal PRIVATE yoki bot a'zo emas
+            if "member list is inaccessible" in error_msg:
+                # PRIVATE kanal - bot a'zo bo'lishi kerak
+                # Avval bot kanalda a'zomi tekshirib ko'ramiz
+                try:
+                    bot_member = await bot.get_chat_member(chat_id=f"@{clean_channel}", user_id=bot.id)
+                    if bot_member.status == 'left':
+                        # Bot kanalda emas -> bu kanalni o'tkazib yuboramiz (o'chirmaymiz)
+                        print(f"⚠️ Bot {channel_username} kanalida emas, tekshiruv o'tkazib yuborildi.")
+                    else:
+                        # Bot a'zo lekin admin emas - PRIVATE kanal
+                        # Bu holda foydalanuvchini tekshirib bo'lmaydi
+                        # SHUNING UCHUN: foydalanuvchini a'zo deb hisoblaymiz (o'tkazib yuboramiz)
+                        print(f"ℹ️ {channel_username} PRIVATE kanal, bot admin emas. Tekshiruv o'tkazib yuborildi.")
+                except:
+                    # Bot kanal haqida ma'lumot ololmaydi -> o'tkazib yuboramiz
+                    print(f"⚠️ {channel_username} kanali haqida ma'lumot olib bo'lmadi, o'tkazib yuborildi.")
+                    
+            elif "chat not found" in error_msg or "invalid username" in error_msg:
+                # Kanal topilmadi -> o'tkazib yuboramiz (o'chirmaymiz)
+                print(f"⚠️ Kanal {channel_username} topilmadi, tekshiruv o'tkazib yuborildi.")
+                
             elif "bot is not a member" in error_msg:
-                cursor.execute("UPDATE forced_channels SET is_active = 0 WHERE id = ?", (ch_id,))
-                conn.commit()
-                logging.warning(f"⚠️ Bot {channel_username} kanaliga a'zo emas, kanal o'chirildi.")
+                # Bot kanalda emas -> o'tkazib yuboramiz
+                print(f"⚠️ Bot {channel_username} kanaliga a'zo emas, tekshiruv o'tkazib yuborildi.")
+                
             else:
-                not_subscribed.append(f"@{clean_channel}")
-                logging.error(f"Kanal tekshirish xatosi {channel_username}: {e}")
+                # Boshqa xatolik -> o'tkazib yuboramiz
+                print(f"⚠️ Kanal tekshirish xatosi {channel_username}: {e}")
+
     return len(not_subscribed) == 0, not_subscribed
 
 async def get_subscription_keyboard(not_subscribed: List[str]) -> InlineKeyboardMarkup:
@@ -731,7 +754,7 @@ async def search_media_query(message: Message, state: FSMContext):
     await state.clear()
 
 # ================================================================
-# 13-RASM ORQALI QIDIRUV (Haqiqiy API bilan)
+# 13-RASM ORQALI QIDIRUV
 # ================================================================
 @dp.callback_query(F.data == "search_image")
 async def search_image_start(callback: CallbackQuery, state: FSMContext):
@@ -758,7 +781,7 @@ async def search_by_image(message: Message, state: FSMContext):
     
     await message.answer("🖼 Rasm qabul qilindi! 🔍 Qidiruv boshlanmoqda...")
     
-    # Haqiqiy rasm tahlili uchun trace.moe API dan foydalanamiz
+    # Rasm orqali qidiruv uchun trace.moe API
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     file_bytes = await bot.download_file(file.file_path)
@@ -766,12 +789,10 @@ async def search_by_image(message: Message, state: FSMContext):
     import aiohttp
     import base64
     
-    # Rasmni base64 ga o'tkazish
     image_base64 = base64.b64encode(file_bytes.read()).decode('utf-8')
     
     async with aiohttp.ClientSession() as session:
         try:
-            # trace.moe API ga so'rov yuborish
             async with session.post('https://api.trace.moe/search', data={'image': image_base64}) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -781,7 +802,6 @@ async def search_by_image(message: Message, state: FSMContext):
                         similarity = top_result.get('similarity', 0) * 100
                         episode = top_result.get('episode', '?')
                         
-                        # Bazadan shu nomdagi animeni qidirish
                         cursor.execute("SELECT id, name, code FROM media WHERE name LIKE ? LIMIT 5", (f"%{anime_name}%",))
                         media_results = cursor.fetchall()
                         
@@ -801,7 +821,6 @@ async def search_by_image(message: Message, state: FSMContext):
                     await message.answer("❌ API xatolik! Keyinroq urinib ko'ring.")
         except Exception as e:
             logging.error(f"Rasm qidiruv xatosi: {e}")
-            # API ishlamasa, bazadagi birinchi 10 ta mediadan taklif qilamiz
             cursor.execute("SELECT id, name, code FROM media LIMIT 10")
             media_list = cursor.fetchall()
             if media_list:
@@ -1619,9 +1638,9 @@ async def forced_add_start(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(ForcedChannelState.waiting_for_channel)
     try:
-        await callback.message.edit_text("➕ Kanal username yoki linkini yuboring:\nMasalan: @kanal yoki https://t.me/kanal")
+        await callback.message.edit_text("➕ Kanal username yoki linkini yuboring:\nMasalan: @kanal yoki https://t.me/kanal\n\n⚠️ Eslatma: PUBLIC kanallar uchun botni oddiy a'zo qilish kifoya. PRIVATE kanallar uchun bot admin bo'lishi kerak.")
     except:
-        await safe_send_message(callback.from_user.id, "➕ Kanal username yoki linkini yuboring:\nMasalan: @kanal yoki https://t.me/kanal")
+        await safe_send_message(callback.from_user.id, "➕ Kanal username yoki linkini yuboring:\nMasalan: @kanal yoki https://t.me/kanal\n\n⚠️ Eslatma: PUBLIC kanallar uchun botni oddiy a'zo qilish kifoya. PRIVATE kanallar uchun bot admin bo'lishi kerak.")
     await callback.answer()
 
 @dp.message(ForcedChannelState.waiting_for_channel)
@@ -1644,7 +1663,7 @@ async def forced_add_channel(message: Message, state: FSMContext):
         await bot.get_chat(f"@{clean}")
         cursor.execute("INSERT INTO forced_channels (channel_username, is_active) VALUES (?, ?)", (channel, 1))
         conn.commit()
-        await message.answer(f"✅ {channel} majburiy a'zolik ro'yxatiga qo'shildi!")
+        await message.answer(f"✅ {channel} majburiy a'zolik ro'yxatiga qo'shildi!\n\n⚠️ Eslatma: Botni kanalga a'zo qiling (PUBLIC kanal bo'lsa oddiy a'zo kifoya, PRIVATE bo'lsa admin bo'lishi kerak)")
     except Exception as e:
         await message.answer(f"❌ Xatolik: Kanal topilmadi yoki bot a'zo emas.\n{e}")
     await state.clear()
@@ -1654,7 +1673,7 @@ async def forced_remove_list(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q!")
         return
-    cursor.execute("SELECT id, channel_username FROM forced_channels ORDER BY channel_username")
+    cursor.execute("SELECT id, channel_username, is_active FROM forced_channels ORDER BY channel_username")
     channels = cursor.fetchall()
     if not channels:
         try:
@@ -1706,6 +1725,7 @@ async def forced_list(callback: CallbackQuery):
         for ch_username, active in channels:
             status = "✅ aktiv" if active else "❌ noaktiv"
             text += f"• {ch_username} ({status})\n"
+        text += "\n⚠️ Eslatma: PUBLIC kanallar bot oddiy a'zo bo'lsa ishlaydi. PRIVATE kanallar uchun bot admin bo'lishi kerak."
     try:
         await callback.message.edit_text(text)
     except:
@@ -1778,7 +1798,7 @@ async def admin_manage_user_id(message: Message, state: FSMContext):
             conn.commit()
             await message.answer(f"✅ {user_id} admin qo'shildi!" if cursor.rowcount > 0 else f"⚠️ {user_id} allaqachon admin!")
             try:
-                await bot.send_message(user_id, "🎉 Siz admin etib tayinlandingiz!\n/admin orqali panelga kiring.")
+                await bot.send_message(user_id, "🎉 Siz admin etib tayinlandingiz!\nAdmin panelga /admin orqali kiring.")
             except:
                 pass
         else:
@@ -1882,7 +1902,7 @@ async def post_channel(message: Message, state: FSMContext):
 └─────────────────────────────────
 
 🔢 Kod: <code>{code}</code>
-📢 Kanal: @AniCity_Rasmiy
+📢 Kanal: {MAIN_CHANNEL}
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1921,7 +1941,7 @@ async def post_confirm(callback: CallbackQuery, state: FSMContext):
 └─────────────────────────────────
 
 🔢 Kod: <code>{code}</code>
-📢 Kanal: @AniCity_Rasmiy
+📢 Kanal: {MAIN_CHANNEL}
 """
     
     bot_info = await bot.get_me()
@@ -2072,7 +2092,7 @@ async def part_post_channel(message: Message, state: FSMContext):
 • Anime KODI: {media_code}
 └─────────────────────────────────
 
-📢 Kanal: @AniCity_Rasmiy
+📢 Kanal: {MAIN_CHANNEL}
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -2104,7 +2124,7 @@ async def part_post_confirm(callback: CallbackQuery, state: FSMContext):
 • Anime KODI: {media_code}
 └─────────────────────────────────
 
-📢 Kanal: @AniCity_Rasmiy
+📢 Kanal: {MAIN_CHANNEL}
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -2229,7 +2249,7 @@ async def handle_unknown(message: Message):
 # ================================================================
 async def main():
     print("=" * 60)
-    print("🤖 ANICITY RASMIY BOT - TO'LIQ VERSIYA")
+    print("🤖 ANICITY RASMIY BOT - TO'LIQ TUZATILGAN VERSIYA")
     print("=" * 60)
     print(f"👑 Adminlar: {ADMINS}")
     print(f"📢 Asosiy kanal: {MAIN_CHANNEL}")
@@ -2238,6 +2258,7 @@ async def main():
     print("=" * 60)
     print("✅ Barcha modullar muvaffaqiyatli yuklandi!")
     print("📌 Bot to'liq ishga tushdi!")
+    print("⚠️ Eslatma: Majburiy kanallar PUBLIC bo'lishi kerak yoki bot ADMIN bo'lishi kerak!")
     print("=" * 60)
     
     try:
