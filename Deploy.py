@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ================================================================
-# BOT DEPLOY BOT - AIOGRAM VERSIYA (TO'LIQ SAQLANADI)
-# Version: 7.0
+# BOT DEPLOY BOT - TO'LIQ TUZATILGAN
+# Version: 7.1
 # Sana: 2026-04-07
-# ================================================================
-# TUZATILDI: Server restartda deploy qilingan botlar saqlanadi va tiklanadi
-# TUZATILDI: Baza va fayllar to'liq saqlanadi
 # ================================================================
 
 import asyncio
@@ -30,7 +27,6 @@ import platform
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Dict, List, Tuple, Any
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
@@ -121,7 +117,6 @@ EMOJI_INFO = "ℹ️"
 EMOJI_LOCK = "⛔"
 EMOJI_MESSAGE = "💬"
 EMOJI_SAVE = "💾"
-EMOJI_DATABASE = "🗄️"
 
 YES_TEXT = "✅ Bor"
 NO_TEXT = "❌ Yo'q"
@@ -191,7 +186,7 @@ def truncate_text(text, max_length=4096):
 
 
 # ================================================================
-# MA'LUMOTLAR BAZASI (TO'LIQ SAQLANADI VA BACKUP QILINADI)
+# MA'LUMOTLAR BAZASI
 # ================================================================
 
 class Database:
@@ -209,23 +204,18 @@ class Database:
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA foreign_keys=ON")
-            self.conn.execute("PRAGMA busy_timeout=5000")
             log.info(f"Bazaga ulandi: {self.db_path}")
         except Exception as e:
             log.error(f"Bazaga ulanishda xatolik: {e}")
             raise
 
     def _migrate_database(self):
-        """Eski bazani yangilash"""
         try:
             cursor = self.conn.execute("PRAGMA table_info(deployments)")
             columns = [col[1] for col in cursor.fetchall()]
             if 'updated_at' not in columns:
                 self.conn.execute("ALTER TABLE deployments ADD COLUMN updated_at TEXT")
                 log.info("Database migrated: added updated_at column")
-            if 'code_dir' not in columns:
-                self.conn.execute("ALTER TABLE deployments ADD COLUMN code_dir TEXT")
-                log.info("Database migrated: added code_dir column")
         except Exception as e:
             log.warning(f"Migration xatosi: {e}")
 
@@ -314,17 +304,7 @@ class Database:
                 self.conn.commit()
                 return cursor
             except Exception as e:
-                log.error(f"DB xatosi: {e}\nSQL: {query[:200]}")
-                return None
-
-    def executemany(self, query, params_list):
-        with self._lock:
-            try:
-                cursor = self.conn.executemany(query, params_list)
-                self.conn.commit()
-                return cursor
-            except Exception as e:
-                log.error(f"DB executemany xatosi: {e}")
+                log.error(f"DB xatosi: {e}")
                 return None
 
     def fetchone(self, query, params=()):
@@ -403,17 +383,14 @@ class Database:
         self.execute(f"UPDATE deployments SET {', '.join(sets)} WHERE deploy_id=?", params)
 
     def delete_deploy(self, deploy_id):
-        # Avval deploy papkasini o'chirish (agar mavjud bo'lsa)
         deploy = self.get_deploy(deploy_id)
         if deploy and deploy['code_dir'] and os.path.exists(deploy['code_dir']):
             try:
                 shutil.rmtree(deploy['code_dir'], ignore_errors=True)
-                log.info(f"Deploy papkasi o'chirildi: {deploy['code_dir']}")
             except Exception as e:
                 log.warning(f"Deploy papkasini o'chirish xatosi: {e}")
         self.execute('DELETE FROM deployments WHERE deploy_id=?', (deploy_id,))
         self.execute('DELETE FROM bot_logs WHERE deploy_id=?', (deploy_id,))
-        log.info(f"Deploy {deploy_id} o'chirildi")
 
     def get_stats_summary(self):
         total = self.count('deployments')
@@ -431,44 +408,10 @@ class Database:
             'today': dict(today_stats) if today_stats else {}
         }
 
-    def backup_database(self, backup_path=None):
-        """Bazani backup qilish"""
-        if not backup_path:
-            backup_path = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        try:
-            with self._lock:
-                backup = sqlite3.connect(backup_path)
-                self.conn.backup(backup)
-                backup.close()
-            log.info(f"Baza backup qilindi: {backup_path}")
-            return backup_path
-        except Exception as e:
-            log.error(f"Backup xatosi: {e}")
-            return None
-
-    def get_database_size(self):
-        """Baza hajmini olish"""
-        try:
-            size = os.path.getsize(self.db_path)
-            return format_size(size)
-        except:
-            return "Noma'lum"
-
-    def vacuum(self):
-        """Bazani optimallashtirish"""
-        try:
-            self.conn.execute("VACUUM")
-            log.info("Database VACUUM qilindi")
-            return True
-        except Exception as e:
-            log.error(f"VACUUM xatosi: {e}")
-            return False
-
     def close(self):
         try:
             if self.conn:
                 self.conn.close()
-                log.info("Baza yopildi")
         except:
             pass
 
@@ -510,7 +453,6 @@ class FileHandler:
             target_path = os.path.join(target_dir, safe_name)
             os.makedirs(target_dir, exist_ok=True)
             shutil.copy2(file_path, target_path)
-            log.info(f"Fayl saqlandi: {target_path}")
             return os.path.normpath(target_path)
         except Exception as e:
             log.error(f"Faylni saqlash xatosi: {e}")
@@ -567,15 +509,6 @@ class CodeAnalyzer:
             (r'TOKEN\s*=\s*["\']([^"\']+)["\']', 'TOKEN='),
             (r'API_TOKEN\s*=\s*["\']([^"\']+)["\']', 'API_TOKEN='),
         ]
-        self.aiogram_patterns = [
-            r'from\s+aiogram\s+import',
-            r'import\s+aiogram',
-            r'Dispatcher',
-            r'Router',
-            r'types\.Message',
-            r'@.*\.message',
-            r'@.*\.callback_query',
-        ]
 
     def analyze_code(self, file_path):
         result = {
@@ -612,13 +545,6 @@ class CodeAnalyzer:
                     result['is_aiogram'] = True
                 break
 
-        if not result['is_aiogram']:
-            for pattern in self.aiogram_patterns:
-                if re.search(pattern, content, re.IGNORECASE):
-                    result['framework'] = 'aiogram'
-                    result['is_aiogram'] = True
-                    break
-
         import_matches = re.findall(r'^(?:from|import)\s+([\w.]+)', content, re.MULTILINE)
         result['imports'] = list(set(import_matches))
 
@@ -642,9 +568,6 @@ class CodeAnalyzer:
                                 result['requirements'].append(pkg)
             except:
                 pass
-
-        if result['is_aiogram'] and 'aiogram' not in result['requirements']:
-            result['requirements'].insert(0, 'aiogram')
 
         try:
             compile(content, file_path, 'exec')
@@ -678,16 +601,9 @@ class CodeAnalyzer:
         txt += f"{EMOJI_BOX} Requirements: {'Bor' if analysis['has_requirements'] else 'Yo'}"
         if analysis['requirements']:
             txt += f" ({len(analysis['requirements'])} ta)"
-            if 'aiogram' in analysis['requirements']:
-                txt += f" [{EMOJI_CHECK} aiogram]"
         txt += "\n"
         txt += f"{EMOJI_ARROW} Importlar: {len(analysis['imports'])} ta\n"
         txt += f"{EMOJI_STAR} Sifat baho: {analysis['code_quality_score']}/100\n"
-
-        if analysis['warnings']:
-            txt += f"\n{EMOJI_WARNING} Ogohlantirishlar:\n"
-            for w in analysis['warnings'][:3]:
-                txt += f"   • {w}\n"
         return txt
 
     def inject_token(self, file_path, token):
@@ -822,8 +738,6 @@ class ProcessManager:
                     if deploy_id in self.processes:
                         line = line.rstrip('\n\r')
                         self.processes[deploy_id]['logs'].append(line)
-                        short_line = line[:150] if len(line) > 150 else line
-                        log.info(f"LOG {deploy_id}: {short_line}")
                         if len(self.processes[deploy_id]['logs']) > MAX_LOG_LINES:
                             self.processes[deploy_id]['logs'] = self.processes[deploy_id]['logs'][-MAX_LOG_LINES//2:]
                 except Exception as e:
@@ -850,7 +764,6 @@ class ProcessManager:
                 return False, f"To'xtatishda xato: {e}"
         info['status'] = BOT_STATUS_STOPPED
         info['stopped_at'] = str(datetime.now())
-        log.info(f"Bot {deploy_id} to'xtatildi")
         return True, "Bot to'xtatildi"
 
     def restart(self, deploy_id):
@@ -895,15 +808,20 @@ class ProcessManager:
     def get_process_info(self, deploy_id):
         return self.processes.get(deploy_id)
 
+    # ========== MUHIM: QAYTA TIKLASH FUNKSIYASI ==========
     def restore_all_bots(self, db):
         """Server restartdan keyin barcha botlarni qayta ishga tushirish"""
-        # Barcha deploylarni olish (statusidan qat'iy nazar)
+        # Barcha deploylarni olish
         deploys = db.get_all_deploys()
+        
+        if not deploys:
+            log.info("Qayta tiklanadigan botlar yo'q")
+            return 0, 0
+        
         log.info(f"Qayta tiklanadigan botlar: {len(deploys)} ta")
         
         restored = 0
         failed = 0
-        skipped = 0
         
         for deploy in deploys:
             deploy_id = deploy['deploy_id']
@@ -924,7 +842,6 @@ class ProcessManager:
                 failed += 1
                 continue
             
-            # Token mavjudligini tekshirish
             if not token:
                 log.warning(f"Bot {deploy_id} tokeni topilmadi")
                 db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message="Token topilmadi")
@@ -945,9 +862,9 @@ class ProcessManager:
                 log.error(f"❌ Bot {deploy_id} qayta tiklanmadi: {msg}")
                 db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message=msg)
             
-            time.sleep(0.5)  # Rate limiting
+            time.sleep(0.5)
         
-        log.info(f"Qayta tiklash yakunlandi: {restored} restored, {failed} failed, {skipped} skipped")
+        log.info(f"Qayta tiklash yakunlandi: {restored} restored, {failed} failed")
         return restored, failed
 
     def stop_all(self):
@@ -1016,7 +933,7 @@ class DeployEngine:
         self.tv = tv
         self.fh = FileHandler()
         self.code_analyzer = CodeAnalyzer()
-        self.user_data = {}
+        self.user_states = {}
 
     def generate_deploy_id(self):
         return generate_id("dep", 10)
@@ -1081,13 +998,11 @@ class DeployEngine:
             self.db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, pid=pid, started_at=now)
             self.db.execute('UPDATE users SET bot_count=bot_count+1, total_deploys=total_deploys+1, '
                             'successful_deploys=successful_deploys+1, last_active=? WHERE user_id=?', (now, user_id))
-            log.info(f"Bot {deploy_id} muvaffaqiyatli deploy qilindi")
             return deploy_id, proc_msg, analysis
         else:
             self.db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message=proc_msg)
             self.db.execute('UPDATE users SET total_deploys=total_deploys+1, failed_deploys=failed_deploys+1, '
                             'last_active=? WHERE user_id=?', (now, user_id))
-            log.error(f"Bot {deploy_id} deploy qilishda xato: {proc_msg}")
             return None, proc_msg, analysis
 
     async def stop_bot(self, deploy_id, user_id):
@@ -1098,7 +1013,6 @@ class DeployEngine:
         if success:
             now = str(datetime.now())
             self.db.update_deploy_status(deploy_id, BOT_STATUS_STOPPED, stopped_at=now)
-            log.info(f"Bot {deploy_id} to'xtatildi")
         return success, msg
 
     async def restart_bot(self, deploy_id, user_id):
@@ -1113,7 +1027,6 @@ class DeployEngine:
             now = str(datetime.now())
             new_count = proc_info.get('restart_count', 0) + 1
             self.db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, restart_count=new_count, last_restart=now)
-            log.info(f"Bot {deploy_id} qayta ishga tushirildi")
         return success, msg
 
     async def start_bot(self, deploy_id, user_id):
@@ -1130,7 +1043,6 @@ class DeployEngine:
             now = str(datetime.now())
             pid = self.pm.processes[deploy_id]['process'].pid
             self.db.update_deploy_status(deploy_id, BOT_STATUS_RUNNING, pid=pid, started_at=now)
-            log.info(f"Bot {deploy_id} ishga tushirildi")
         else:
             self.db.update_deploy_status(deploy_id, BOT_STATUS_FAILED, error_message=msg)
         return success, msg
@@ -1143,7 +1055,6 @@ class DeployEngine:
         self.db.delete_deploy(deploy_id)
         self.db.execute('UPDATE users SET bot_count=MAX(bot_count-1,0), last_active=? WHERE user_id=?',
                         (str(datetime.now()), user_id))
-        log.info(f"Bot {deploy_id} o'chirildi")
         return True, "Bot o'chirildi"
 
     async def get_bot_status(self, deploy_id):
@@ -1170,6 +1081,16 @@ class DeployEngine:
 
     async def get_logs(self, deploy_id, limit=50):
         return self.pm.get_logs(deploy_id, limit)
+
+    def set_user_state(self, user_id, state, data=None):
+        self.user_states[user_id] = {'state': state, 'data': data or {}, 'updated': str(datetime.now())}
+
+    def get_user_state(self, user_id):
+        return self.user_states.get(user_id)
+
+    def clear_user_state(self, user_id):
+        if user_id in self.user_states:
+            del self.user_states[user_id]
 
 
 # ================================================================
@@ -1228,89 +1149,6 @@ if __name__ == "__main__":
     asyncio.run(main())
 ''',
         },
-        'aiogram_menu': {
-            'name': 'Aiogram Menu Bot',
-            'description': 'Menyu bilan aiogram bot',
-            'framework': 'aiogram',
-            'code': '''import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-
-BOT_TOKEN = "YOUR_TOKEN_HERE"
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="Boshlash"), KeyboardButton(text="Yordam")],
-        [KeyboardButton(text="Haqida")]
-    ],
-    resize_keyboard=True
-)
-
-@dp.message(Command("start"))
-async def start(message: types.Message):
-    await message.answer("Assalomu alaykum! Men menu botman.", reply_markup=menu)
-
-@dp.message(lambda m: m.text == "Boshlash")
-async def handle_start(message: types.Message):
-    await message.answer("Bot ishga tushdi!")
-
-@dp.message(lambda m: m.text == "Yordam")
-async def handle_help(message: types.Message):
-    await message.answer("/start - Boshlash\\n/help - Yordam")
-
-@dp.message(lambda m: m.text == "Haqida")
-async def handle_about(message: types.Message):
-    await message.answer("Bu aiogram bot shabloni.")
-
-async def main():
-    print("Aiogram bot ishga tushdi...")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-''',
-        },
-        'aiogram_inline': {
-            'name': 'Aiogram Inline Bot',
-            'description': 'Inline tugmalar bilan aiogram bot',
-            'framework': 'aiogram',
-            'code': '''import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-BOT_TOKEN = "YOUR_TOKEN_HERE"
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-@dp.message(Command("start"))
-async def start(message: types.Message):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Tugma 1", callback_data="btn1")],
-        [InlineKeyboardButton(text="Tugma 2", callback_data="btn2")],
-        [InlineKeyboardButton(text="Sayt", url="https://example.com")]
-    ])
-    await message.answer("Inline tugmalar!", reply_markup=keyboard)
-
-@dp.callback_query()
-async def callback(callback: types.CallbackQuery):
-    if callback.data == "btn1":
-        await callback.answer("Tugma 1 bosildi!")
-    elif callback.data == "btn2":
-        await callback.answer("Tugma 2 bosildi!")
-    await callback.message.answer(f"{callback.data} tanlandi.")
-
-async def main():
-    print("Aiogram inline bot ishga tushdi...")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-''',
-        },
     }
 
     def get_template_list(self):
@@ -1346,7 +1184,6 @@ class DeployBot:
     def _init_dirs(self):
         for d in [DEPLOY_DIR, LOGS_DIR, TEMPLATES_DIR]:
             os.makedirs(d, exist_ok=True)
-        log.info(f"Papkalar tayyor: {DEPLOY_DIR}, {LOGS_DIR}, {TEMPLATES_DIR}")
 
     def _ikb(self, btns, width=2):
         keyboard = []
@@ -1409,33 +1246,6 @@ class DeployBot:
         async def cancel_cmd(message: types.Message, state: FSMContext):
             await self._cancel(message, state)
 
-        @dp.message(Command("backup"))
-        async def backup_cmd(message: types.Message):
-            if message.from_user.id != self.owner_id:
-                await message.answer(f"{EMOJI_LOCK} Faqat owner uchun!")
-                return
-            backup_path = self.db.backup_database()
-            if backup_path and os.path.exists(backup_path):
-                await self.bot.send_document(
-                    message.chat.id,
-                    types.FSInputFile(backup_path, filename=os.path.basename(backup_path)),
-                    caption=f"{EMOJI_SAVE} Baza backup qilindi!\n📁 Hajm: {self.db.get_database_size()}"
-                )
-                os.remove(backup_path)
-            else:
-                await message.answer(f"{EMOJI_CROSS} Backup qilib bo'lmadi!")
-
-        @dp.message(Command("vacuum"))
-        async def vacuum_cmd(message: types.Message):
-            if message.from_user.id != self.owner_id:
-                await message.answer(f"{EMOJI_LOCK} Faqat owner uchun!")
-                return
-            result = self.db.vacuum()
-            if result:
-                await message.answer(f"{EMOJI_CHECK} Baza optimallashtirildi!\n📁 Hajm: {self.db.get_database_size()}")
-            else:
-                await message.answer(f"{EMOJI_CROSS} Optimallashtirishda xatolik!")
-
         @dp.callback_query()
         async def callback_handler(callback: types.CallbackQuery, state: FSMContext):
             await self._callback(callback, state)
@@ -1482,7 +1292,7 @@ class DeployBot:
             if current_state == DeployStates.waiting_for_token.state:
                 await self._receive_token(message, state)
             else:
-                pass  # Jim turadi
+                pass
 
     async def _start(self, message: types.Message, state: FSMContext):
         uid = message.from_user.id
@@ -1505,7 +1315,7 @@ class DeployBot:
         bots_count = self.db.count('deployments', 'user_id=?', (uid,))
 
         text = f"""
-{EMOJI_ROCKET} BOT DEPLOY BOT (Aiogram) v7.0
+{EMOJI_ROCKET} BOT DEPLOY BOT (Aiogram) v7.1
 {'=' * 35}
 
 Assalomu alaykum, {ui}!
@@ -1513,7 +1323,6 @@ Assalomu alaykum, {ui}!
 Bu bot orqali o'zingiz yozgan Python kodini Telegram botga aylantirishingiz mumkin!
 
 {EMOJI_CHART} Sizning botlaringiz: {bots_count} ta
-{EMOJI_DATABASE} Baza hajmi: {self.db.get_database_size()}
 
 {EMOJI_STAR} QADAMLAR:
 {'-' * 35}
@@ -1522,11 +1331,9 @@ Bu bot orqali o'zingiz yozgan Python kodini Telegram botga aylantirishingiz mumk
 3. {EMOJI_CHECK} Bot avtomatik deploy bo'ladi!
 {'-' * 35}
 
-{EMOJI_INFO} MUHIM MA'LUMOT:
+{EMOJI_INFO} MUHIM:
 ✅ Deploy qilingan botlar server restartda SAQLANADI va AVTOMATIK TIKLANADI
 ✅ Barcha ma'lumotlar bazada saqlanadi
-✅ Backup qilish: /backup
-✅ Bazani optimallashtirish: /vacuum
 
 {EMOJI_WARNING} Fayl .py formatda bo'lishi shart!
 Maksimal hajm: {format_size(MAX_FILE_SIZE)}
@@ -1569,14 +1376,7 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
   /delete - Botni o'chirish
   /stats - Statistika
   /templates - Shablonlar
-  /backup - Bazani backup qilish
-  /vacuum - Bazani optimallashtirish
   /cancel - Bekor qilish
-
-{EMOJI_INFO} SAQLASH VA TIKLASH:
-  ✅ Deploy qilingan botlar avtomatik saqlanadi
-  ✅ Server restartda avtomatik tiklanadi
-  ✅ Barcha ma'lumotlar bazada saqlanadi
 """
         await message.answer(text)
 
@@ -1721,16 +1521,11 @@ Maksimal hajm: {format_size(MAX_FILE_SIZE)}
 {EMOJI_CROSS} Muvaffaqiyatsiz: {stats['failed']}
 {EMOJI_QUESTION} Foydalanuvchilar: {stats['users']}
 {EMOJI_CLOCK} Bot uptime: {format_uptime(uptime)}
-{EMOJI_DATABASE} Baza hajmi: {self.db.get_database_size()}
 
 {EMOJI_STAR} BUGUN:
   Deploylar: {stats['today'].get('total_deploys', 0)}
   Muvaffaqiyatli: {stats['today'].get('successful', 0)}
   Yangi foydalanuvchilar: {stats['today'].get('new_users', 0)}
-
-{EMOJI_INFO} SAQLASH HOLATI:
-  ✅ Server restartda botlar avtomatik tiklanadi
-  ✅ Barcha ma'lumotlar saqlanadi
 """
         await message.answer(text)
 
@@ -1904,7 +1699,6 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
                 f"{EMOJI_PAGE} Fayl: {filename}\n"
                 f"{EMOJI_SIZE} Qatorlar: {lines}\n\n"
                 f"{EMOJI_GREEN} Bot ishga tushdi va tayyor!\n"
-                f"{EMOJI_INFO} Loglarni /logs buyrug'i bilan ko'ring.\n"
                 f"{EMOJI_SAVE} Bot server restartda avtomatik tiklanadi!",
                 reply_markup=self._ikb([(f"{EMOJI_LIST} Botni ko'rish", f"bot_{deploy_id}")], 1)
             )
@@ -2043,8 +1837,7 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
 
     async def on_startup(self):
         log.info("=" * 50)
-        log.info("BOT DEPLOY BOT v7.0 ISHGA TUSHMOQDA")
-        log.info("=" * 50)
+        log.info("Bot ishga tushmoqda...")
         
         try:
             await self.bot.delete_webhook(drop_pending_updates=True)
@@ -2052,18 +1845,15 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
         except Exception as e:
             log.warning(f"Webhook o'chirish xatosi: {e}")
         
-        # Avvalgi botlarni qayta tiklash (BAZA SAQLANADI)
+        # ========== MUHIM: AVVALGI BOTLARNI QAYTA TIKLASH ==========
         log.info("Avvalgi botlarni qayta tiklash boshlanmoqda...")
         restored, failed = self.pm.restore_all_bots(self.db)
         
-        log.info("=" * 50)
         if restored > 0:
             log.info(f"✅ {restored} ta bot qayta tiklandi")
         if failed > 0:
             log.warning(f"❌ {failed} ta bot qayta tiklanmadi")
-        log.info(f"📁 Baza hajmi: {self.db.get_database_size()}")
-        log.info(f"📂 Deploy papkasi: {os.path.abspath(DEPLOY_DIR)}")
-        log.info(f"🗄️ Baza manzili: {os.path.abspath(self.db.db_path)}")
+        
         log.info("=" * 50)
 
     async def on_shutdown(self):
@@ -2080,7 +1870,6 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
             me = await self.bot.get_me()
             log.info(f"Bot ishga tushdi: @{me.username}")
             print(f"{EMOJI_ROCKET} Bot ishga tushdi: @{me.username}")
-            print(f"{EMOJI_SAVE} Deploy qilingan botlar server restartda avtomatik tiklanadi!")
             await self.dp.start_polling(self.bot)
         except Exception as e:
             log.error(f"Bot xatosi: {e}")
@@ -2095,49 +1884,36 @@ Bot kodingizni .py fayl ko'rinishida yuboring.
 def print_banner():
     sys_info = get_system_info()
     banner = f"""
-{'=' * 60}
-{' ' * 15}{EMOJI_ROCKET} BOT DEPLOY BOT v7.0
-{'=' * 60}
+{'=' * 55}
+{' ' * 12}{EMOJI_ROCKET} BOT DEPLOY BOT v7.1 (Aiogram)
+{'=' * 55}
 
-  Versiya:      7.0 (Baza saqlanadi va qayta tiklanadi)
+  Versiya:      7.1 (To'liq qayta tiklanadi)
   Sana:         2026-04-07
   Platform:     {sys_info['platform']} {sys_info['platform_release']}
   Python:       {sys_info['python_version']}
 
-{'=' * 60}
+{'=' * 55}
   XUSUSIYATLAR:
-{'=' * 60}
+{'=' * 55}
   {EMOJI_CHECK} Aiogram va Telebot bilan ishlaydi
   {EMOJI_CHECK} Oddiy .py fayl qabul qiladi
   {EMOJI_CHECK} Kod tahlili va sifat bahosi
   {EMOJI_CHECK} Xavfli kodlarni bloklash
   {EMOJI_CHECK} Avtomatik qayta ishga tushirish
-  {EMOJI_CHECK} Bot shablonlari (Aiogram + Telebot)
-  {EMOJI_CHECK} Statistika va monitoring
+  {EMOJI_CHECK} Bot shablonlari
   {EMOJI_CHECK} ✅ Server restartda avvalgi botlar avtomatik tiklanadi
   {EMOJI_CHECK} ✅ Baza ma'lumotlari saqlanadi va qayta tiklanadi
-  {EMOJI_CHECK} ✅ Webhook avtomatik o'chiriladi
-  {EMOJI_SAVE} Backup qilish (/backup)
-  {EMOJI_DATABASE} Bazani optimallashtirish (/vacuum)
 
-{'=' * 60}
-  SAQLASH MEXANIZMI:
-{'=' * 60}
-  ✅ Har bir deploy qilingan bot bazada saqlanadi
-  ✅ Bot fayllari deployed_bots/ papkasida saqlanadi
-  ✅ Server restartda barcha botlar avtomatik tiklanadi
-  ✅ Anime bot kabi botlarning ichki ma'lumotlari saqlanadi
-
-{'=' * 60}
+{'=' * 55}
   SOZLAMALAR:
-{'=' * 60}
+{'=' * 55}
   Maksimal fayl:  {format_size(MAX_FILE_SIZE)}
   Auto-restart:   {'Yoq' if AUTO_RESTART else 'Yo' + "'q"}
   Max restart:    {MAX_RESTART_ATTEMPTS} ta
   DB:             deploy_bots.db
-  DEPLOY_DIR:     {DEPLOY_DIR}/
 
-{'=' * 60}
+{'=' * 55}
 """
     print(banner)
 
