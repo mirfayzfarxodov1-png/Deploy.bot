@@ -10,7 +10,7 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # 6 daqiqa (cron 1 daqiqadan ko'p)
+    timeout-minutes: 6  # 6 daqiqa
     
     steps:
     - uses: actions/checkout@v3
@@ -42,15 +42,13 @@ jobs:
         echo "📂 MA'LUMOTLAR: $(date)"
         echo "=========================================="
         
-        sudo apt-get update -qq && sudo apt-get install -y sqlite3 2>/dev/null
+        # Fayllarni tekshirish
+        echo "📁 Repository fayllari:"
+        ls -la *.py 2>/dev/null || echo "  Python fayl yo'q"
+        ls -la *.db 2>/dev/null || echo "  Database yo'q"
+        ls -la *.jpg *.png 2>/dev/null || echo "  Rasm yo'q"
         
-        if [ -f "anime_bot.db" ]; then
-          echo "✅ DB: $(du -h anime_bot.db | cut -f1)"
-          MEDIA=$(sqlite3 anime_bot.db "SELECT COUNT(*) FROM media;" 2>/dev/null || echo "0")
-          echo "🎬 Media: $MEDIA ta"
-        else
-          echo "⚠️ DB yo'q"
-        fi
+        echo ""
         echo "=========================================="
     
     - name: 📦 Kutubxonalar
@@ -73,13 +71,21 @@ jobs:
           sleep 0.5
         fi
         
-        # Bot faylini tekshirish
-        if [ -f "bot.py" ]; then
+        # Bot faylini topish (Deploy.py yoki bot.py)
+        if [ -f "Deploy.py" ]; then
           BOT_FILE="Deploy.py"
+        elif [ -f "bot.py" ]; then
+          BOT_FILE="bot.py"
+        elif [ -f "main.py" ]; then
+          BOT_FILE="main.py"
         else
-          echo "❌ Deploy.py topilmadi!"
+          echo "❌ Bot fayli topilmadi!"
+          echo "📁 Mavjud fayllar:"
+          ls -la
           exit 1
         fi
+        
+        echo "✅ Bot fayli: $BOT_FILE"
         
         # Botni ishga tushirish
         python $BOT_FILE &
@@ -89,14 +95,13 @@ jobs:
         echo "✅ Bot ishlayapti (PID: $BOT_PID)"
         echo "⏰ Ishga tushgan vaqt: $(date)"
         
-        # 5 daqiqa 50 sekund ishlash (6 daqiqadan kam)
+        # 5 daqiqa 50 sekund ishlash
         sleep 350
         
         echo "🔴 Bot to'xtatilmoqda: $(date)"
         kill -TERM $BOT_PID 2>/dev/null
         sleep 1
         
-        # Agar to'xtamasa majburiy
         if kill -0 $BOT_PID 2>/dev/null; then
           kill -KILL $BOT_PID 2>/dev/null
         fi
