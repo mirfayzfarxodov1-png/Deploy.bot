@@ -75,9 +75,9 @@ jobs:
         
         # Bot faylini tekshirish
         if [ -f "bot.py" ]; then
-          BOT_FILE="bot.py"
+          BOT_FILE="Deploy.py"
         else
-          echo "❌ bot.py topilmadi!"
+          echo "❌ Deploy.py topilmadi!"
           exit 1
         fi
         
