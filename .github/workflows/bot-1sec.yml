@@ -1,16 +1,16 @@
-name: Best 24/7 Bot
+name: 24/7 Anime Bot
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/10 * * * *'  # Har 10 daqiqada GitHub tomonidan qayta ishga tushiriladi
+    - cron: '*/1 * * * *'  # Har 1 daqiqada ishga tushadi
   push:
     branches: [main]
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 9  # 9 daqiqa (cron 10 daqiqadan kam)
+    timeout-minutes: 350  # 6 daqiqa (cron 1 daqiqadan ko'p)
     
     steps:
     - uses: actions/checkout@v3
@@ -20,57 +20,100 @@ jobs:
       with:
         python-version: '3.10'
     
-    - name: Cache everything
-      uses: actions/cache@v3
+    # ============================================================
+    # CACHE - MA'LUMOTLARNI YUKLASH
+    # ============================================================
+    - name: 📥 Cache - Ma'lumotlarni yuklash
+      uses: actions/cache@v4
       with:
         path: |
-          deployed_bots
-          deploy_bots.db
-          bot_logs
-          ~/.cache/pip
-        key: ${{ runner.os }}-deploy-${{ github.run_id }}
+          anime_bot.db
+          Anime.jpg
+          admin.png
+          bot_log.txt
+          bot_pid.txt
+        key: anime-data-v1-${{ github.run_id }}
         restore-keys: |
-          ${{ runner.os }}-deploy-
-          ${{ runner.os }}-
+          anime-data-v1-
     
-    - name: Install
-      run: pip install aiogram==3.15.0 psutil==5.9.6 pyTelegramBotAPI==4.14.0
-    
-    - name: Run (0.1s auto-restart)
-      env:
-        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        OWNER_ID: ${{ secrets.OWNER_ID }}
+    - name: 📊 Ma'lumotlar holati
       run: |
         echo "=========================================="
-        echo "🚀 BOT STARTING AT $(date)"
+        echo "📂 MA'LUMOTLAR: $(date)"
         echo "=========================================="
         
-        # Bazani tekshirish
-        if [ -f "deploy_bots.db" ]; then
-          echo "✅ Database found! Size: $(du -h deploy_bots.db | cut -f1)"
-          echo "📁 Deployed bots: $(ls -la deployed_bots/ 2>/dev/null | grep -c '^d') ta"
+        sudo apt-get update -qq && sudo apt-get install -y sqlite3 2>/dev/null
+        
+        if [ -f "anime_bot.db" ]; then
+          echo "✅ DB: $(du -h anime_bot.db | cut -f1)"
+          MEDIA=$(sqlite3 anime_bot.db "SELECT COUNT(*) FROM media;" 2>/dev/null || echo "0")
+          echo "🎬 Media: $MEDIA ta"
         else
-          echo "⚠️ No existing database, starting fresh..."
+          echo "⚠️ DB yo'q"
+        fi
+        echo "=========================================="
+    
+    - name: 📦 Kutubxonalar
+      run: |
+        pip install --quiet aiogram==3.17.0 aiohttp==3.11.11 aiofiles==24.1.0
+    
+    # ============================================================
+    # BOTNI ISHGA TUSHIRISH
+    # ============================================================
+    - name: 🚀 Bot ishga tushmoqda
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      run: |
+        echo "🚀 BOT START: $(date)"
+        
+        # Avvalgi bot jarayonini to'xtatish
+        if [ -f "bot_pid.txt" ]; then
+          OLD_PID=$(cat bot_pid.txt)
+          kill -TERM $OLD_PID 2>/dev/null && echo "✅ Eski bot to'xtatildi (PID: $OLD_PID)"
+          sleep 0.5
         fi
         
-        # 0.1 sekundda qayta ishga tushadigan loop
-        counter=0
-        while true; do
-          counter=$((counter + 1))
-          echo "[$(date)] 🟢 Starting bot instance #$counter"
-          
-          python Deploy.py &
-          BOT_PID=$!
-          
-          echo "[$(date)] ✅ Bot running (PID: $BOT_PID)"
-          
-          # 8 daqiqa ishlash (cron 10 daqiqadan kam)
-          sleep 480  # 8 daqiqa = 480 sekund
-          
-          echo "[$(date)] 🔴 Stopping bot (PID: $BOT_PID)..."
-          kill -TERM $BOT_PID 2>/dev/null
-          sleep 2
-          
-          echo "[$(date)] 🔄 Restarting in 0.1 seconds..."
-          sleep 0.1
-        done
+        # Bot faylini tekshirish
+        if [ -f "bot.py" ]; then
+          BOT_FILE="bot.py"
+        else
+          echo "❌ bot.py topilmadi!"
+          exit 1
+        fi
+        
+        # Botni ishga tushirish
+        python $BOT_FILE &
+        BOT_PID=$!
+        echo $BOT_PID > bot_pid.txt
+        
+        echo "✅ Bot ishlayapti (PID: $BOT_PID)"
+        echo "⏰ Ishga tushgan vaqt: $(date)"
+        
+        # 5 daqiqa 50 sekund ishlash (6 daqiqadan kam)
+        sleep 350
+        
+        echo "🔴 Bot to'xtatilmoqda: $(date)"
+        kill -TERM $BOT_PID 2>/dev/null
+        sleep 1
+        
+        # Agar to'xtamasa majburiy
+        if kill -0 $BOT_PID 2>/dev/null; then
+          kill -KILL $BOT_PID 2>/dev/null
+        fi
+        
+        echo "✅ Bot to'xtatildi: $(date)"
+    
+    # ============================================================
+    # MA'LUMOTLARNI SAQLASH
+    # ============================================================
+    - name: 💾 Cache - Ma'lumotlarni saqlash
+      if: always()
+      uses: actions/cache@v4
+      with:
+        path: |
+          anime_bot.db
+          Anime.jpg
+          admin.png
+          bot_log.txt
+          bot_pid.txt
+        key: anime-data-v1-${{ github.run_id }}
